@@ -386,3 +386,43 @@ end to end: `RF.SampleRate = 1000000` runs at 1.000 Msps, where before it failed
 Worth recording as a lesson: the bug survived because the one configuration under test never
 touched it. The unit test now pins the whole mapping — all six factors plus the 6 and 8 MHz rates —
 so it cannot regress silently.
+
+## Bring-up session 7 — the decimation ceiling, and a silent failure
+
+Asked what the highest on-chip decimation is. I had previously written "up to 32" from convention —
+the `while(Decimation<32)` cap in my own code — rather than from measurement. Measuring it gave a
+better answer and a genuine trap.
+
+**The ceiling is 32.** A factor of 33 or above makes `sdrplay_api_Init()` fail outright
+(`sdrplay_api_Fail`), confirmed at 33, 40, 48, 64, 128 and 256.
+
+**Only powers of two do anything.** The API accepts 3, 5, 6, 7, 12, 24 without complaint and then
+delivers the full 2 MHz anyway — no error, no warning, no decimation:
+
+| Factor | Expected | Delivered | Verdict |
+|---|---|---|---|
+| 2 | 1.0000 | 1.026 | applied |
+| 4 | 0.5000 | 0.508 | applied |
+| 6 | 0.3333 | 2.077 | **silently ignored** |
+| 7 | 0.2857 | 3.311 | **silently ignored** |
+| 8 | 0.2500 | 0.258 | applied |
+| 16 | 0.1250 | 0.129 | applied |
+| 32 | 0.0625 | 0.063 | applied |
+| 33 | — | — | Init fails |
+
+So the check is on *range*, not on *form*: anything up to 32 is accepted, only powers of two take
+effect, above 32 is rejected. That asymmetry is the dangerous part — a factor of 6 looks like it
+worked, because nothing anywhere reports that it did not.
+
+`SnapSampleRate()` only ever produces powers of two, so the backend cannot reach the silent case.
+Anything driving the API directly can, which is why the probe's `-d` now takes any value and reports
+the delivered rate rather than trusting the factor asked for.
+
+### A measurement artefact worth remembering
+
+Asking for a short capture (40 000 samples) at a high factor produced no rate reading at all,
+because the whole capture arrived in one or two callbacks and the span between first and last was
+effectively zero. The rate figure only means anything when the capture spans enough callbacks to
+time, so the sweeps above size the capture to the factor (roughly 1.5 M samples divided by the
+factor, floored at 150 k). The first sweep, which used a fixed 40 k samples, mislabelled the
+non-power-of-two runs as "no reading" for exactly this reason.
