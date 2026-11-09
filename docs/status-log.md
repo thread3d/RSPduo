@@ -426,3 +426,46 @@ effectively zero. The rate figure only means anything when the capture spans eno
 time, so the sweeps above size the capture to the factor (roughly 1.5 M samples divided by the
 factor, floored at 150 k). The first sweep, which used a fixed 40 k samples, mislabelled the
 non-power-of-two runs as "no reading" for exactly this reason.
+
+## Bring-up session 8 — 32x cannot give 1 MSps, but 1 MSps on both channels does work
+
+Asked whether 32x decimation can give 1 MSps from both channels at once. The two halves have
+opposite answers.
+
+**32x and 1 MSps are mutually exclusive.** 32x of the 2 MHz ADC is 62.5 ksps. To reach 1 MSps at 32x
+you would need a 32 MHz ADC, and the device's maximum is 8 MHz — which at 32x is 250 ksps. There is
+no setting anywhere that combines them.
+
+**1 MSps on both channels at once is not only possible, it is what dual-tuner mode already does** —
+and with a factor of 2, not 32:
+
+```
+tuning      :   868.200 MHz, 1.000 MSps   (tuner A)
+tuner B     :   868.400 MHz
+rate        : 1.003 Msps delivered  (tuner A)
+rate        : 1.003 Msps delivered  (tuner B)
+```
+
+Both tuners, 2 000 000 samples each, simultaneously. Dual mode does not use the caller's
+`decimationFactor` at all: the API derives it from the combination of ADC rate, bandwidth and IF, so
+it is 2 (1 Msps), 3 (2 MSps from a 6 MHz ADC) or 4 (500 ksps or 2 Msps depending on the ADC rate),
+and can never be 32.
+
+### New measurement: the higher ADC rates under-run on this USB link
+
+Testing 6 and 8 MHz as part of this question turned up something worth knowing:
+
+| ADC rate | Requested | Delivered | Shortfall |
+|---|---|---|---|
+| 2 MHz | 2.000 | 2.076 | none |
+| 6 MHz | 6.000 | **3.768** | 37 % |
+| 8 MHz | 8.000 | **5.480** | 32 % |
+
+The RSPduo is on a USB 2.0 bus shared with five RTL-SDR dongles, a LimeSDR and two hubs, so
+6 and 8 MSps of raw I/Q (24 and 32 MB/s) simply do not fit; the stream silently under-runs. The
+shortfall propagates through decimation rather than being absorbed by it, which is the part that
+would catch someone out: 8 MHz at 32x should give 250 ksps and delivers **168 ksps**, because the
+decimator is fed by the data that actually crossed the bus (5.480 / 32 = 0.171).
+
+So the practical ceiling on this machine is the 2 MHz ADC rate, which is what both the single-tuner
+and dual-tuner configurations use.
