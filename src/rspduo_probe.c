@@ -227,10 +227,19 @@ int main(int argc, char **argv)
   /* In dual mode the API demands Tuner_Both, Dual_Tuner mode, and rspDuoSampleFreq set before
      the device is selected; a valid (rate, bandwidth, IF, decimation) combination is also
      required, and IF_Zero is not among them. */
+  /* Dual-tuner mode accepts only fixed (ADC rate, bandwidth, IF, decimation) combinations.
+     Pick one from the ADC rate requested with -r. These come from the reference
+     dual-tuner-recorder implementation; anything else makes Init() fail. */
   sdrplay_api_Bw_MHzT DualBw = sdrplay_api_BW_0_600;
   sdrplay_api_If_kHzT DualIf = sdrplay_api_IF_0_450;
   int                 DualDec = 2;
   double              DualFs  = 2000000.0;
+  if (DualMode)
+  { if      (RateHz >= 8.0e6) { DualFs = 8000000.0; DualBw = sdrplay_api_BW_1_536; DualIf = sdrplay_api_IF_2_048; DualDec = 4; }
+    else if (RateHz >= 6.0e6) { DualFs = 6000000.0; DualBw = sdrplay_api_BW_1_536; DualIf = sdrplay_api_IF_1_620; DualDec = 3; }
+    else if (RateHz >= 3.0e6) { DualFs = 2000000.0; DualBw = sdrplay_api_BW_0_600; DualIf = sdrplay_api_IF_0_450; DualDec = 2; }
+    else if (RateHz >  1.2e6) { DualFs = 2000000.0; DualBw = sdrplay_api_BW_0_600; DualIf = sdrplay_api_IF_0_450; DualDec = 2; }
+    else                      { DualFs = 2000000.0; DualBw = sdrplay_api_BW_0_300; DualIf = sdrplay_api_IF_0_450; DualDec = 4; } }
   if (DualMode)
   { if (FreqB == 0.0) FreqB = FreqHz + 100e3;
     dev.tuner          = sdrplay_api_Tuner_Both;
