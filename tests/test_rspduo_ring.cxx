@@ -245,6 +245,30 @@ int main(void)
     free(xi); free(xq); }
 
   /* ----------------------------------------------------------------------------------------- */
+  printf("\nDecimation mapping\n");
+  { /* The ADC cannot run below 2 MHz - asking for a lower fsHz makes Init() fail, verified on
+       hardware - so every rate below 2 MHz is reached by decimating. SnapSampleRate returns the
+       ADC rate to program and sets the factor; the delivered rate is that divided once. */
+    struct { double Want; double Adc; int Dec; } Cases[] = {
+      { 2000000.0, 2000000.0, 1 }, { 1000000.0, 2000000.0, 2 },
+      {  500000.0, 2000000.0, 4 }, {  250000.0, 2000000.0, 8 },
+      {  125000.0, 2000000.0, 16}, {   62500.0, 2000000.0, 32},
+      { 6000000.0, 6000000.0, 1 }, { 8000000.0, 8000000.0, 1 },
+    };
+    for (unsigned i = 0; i < sizeof(Cases)/sizeof(Cases[0]); i++)
+    { int Dec = 0;
+      double Adc = RSPDuo::SnapSampleRate(Cases[i].Want, Dec);
+      double Delivered = Adc / (double)Dec;
+      char what[160];
+      snprintf(what, sizeof(what), "%.0f Hz asked -> ADC %.0f Hz decimated by %d = %.0f Hz",
+               Cases[i].Want, Adc, Dec, Delivered);
+      int ok = (fabs(Adc - Cases[i].Adc) < 1.0) && (Dec == Cases[i].Dec)
+               && (Delivered >= Cases[i].Want * 0.999);
+      /* The ADC rate must never be below 2 MHz, or Init() would fail. */
+      if (Adc < 2000000.0) ok = 0;
+      check(ok, what); } }
+
+  /* ----------------------------------------------------------------------------------------- */
   printf("\nDual mode: both tuners stream independently\n");
   { /* The whole point of dual mode is that the two rings are independent. Drive the A callback
        with one pattern and the B callback with another, and confirm each is read back separately -

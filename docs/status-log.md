@@ -341,3 +341,48 @@ variable and overrun count, so a slow reader on one cannot stall the other. `Rea
 `ResetBuffer()` take a tuner index, defaulting to 0 (A). The unit test grew a dual-mode section
 that feeds the A and B callbacks different patterns and confirms each is read back separately —
 that is the check which would catch the channel-B reset being mishandled without hardware.
+
+## Bring-up session 6 — decimation: the only way below 2 MHz
+
+Asked whether the device decimates. It does, and checking properly turned up a real bug in my own
+code.
+
+### The ADC floor is hard
+
+Asking the API for a sample rate below 2 MHz without decimation does not get snapped — it fails:
+
+```
+request 2000000 : rate 2.064 Msps delivered
+request 1000000 : Init() failed: sdrplay_api_Fail
+request  500000 : Init() failed: sdrplay_api_Fail
+```
+
+So decimation is not an optimisation, it is the only way to reach any rate below 2 MHz.
+
+### Measured factors
+
+`decimationFactor` takes powers of two up to 32. Delivered rate against a 2 MHz ADC:
+
+| Factor | Expected | Measured | Ratio |
+|---|---|---|---|
+| 1 | 2.000 MSps | 2.044 | 1.02 |
+| 2 | 1.000 MSps | 1.038 | 1.04 |
+| 4 | 0.500 MSps | 0.515 | 1.03 |
+| 8 | 0.250 MSps | 0.258 | 1.03 |
+| 16 | 0.125 MSps | 0.126 | 1.01 |
+| 32 | 0.0625 MSps | 0.063 | 1.02 |
+
+### The bug this exposed
+
+`SnapSampleRate()` returned the already-decimated output rate, but `Open()` assigned that to
+`fsFreq.fsHz` and then divided by the factor again. Wrong twice: it programmed a sub-2 MHz ADC rate,
+so `Init()` would have failed, and had it started it would have reported half the true rate. In
+other words **every single-tuner sample rate below 2 MSps was broken**, and nothing in the 2 MSps
+configuration we actually run exercised the path.
+
+It now returns the ADC rate, and the delivered rate is that divided once by the caller. Verified
+end to end: `RF.SampleRate = 1000000` runs at 1.000 Msps, where before it failed to start.
+
+Worth recording as a lesson: the bug survived because the one configuration under test never
+touched it. The unit test now pins the whole mapping — all six factors plus the 6 and 8 MHz rates —
+so it cannot regress silently.

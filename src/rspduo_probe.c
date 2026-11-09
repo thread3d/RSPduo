@@ -154,10 +154,11 @@ int main(int argc, char **argv)
   int     Shift     = 8;
   int     BulkMode  = 1;
   int     DualMode  = 0;          /* -D: drive both tuners simultaneously */
+  int     Deci      = 1;          /* -d: on-chip decimation factor (2,4,8,16,32) */
   double  FreqB     = 0.0;        /* -B: tuner B centre, default FreqHz + 100 kHz */
 
   int opt;
-  while ((opt = getopt(argc, argv, "f:r:g:l:n:o:s:m:B:Dh")) != -1)
+  while ((opt = getopt(argc, argv, "f:r:g:l:n:o:s:m:B:d:Dh")) != -1)
   { switch (opt)
     { case 'f': FreqHz    = atof(optarg); break;
       case 'r': RateHz    = atof(optarg); break;
@@ -168,6 +169,7 @@ int main(int argc, char **argv)
       case 's': Shift     = atoi(optarg); break;
       case 'm': BulkMode  = (strcmp(optarg, "isoch") != 0); break;
       case 'B': FreqB     = atof(optarg); break;
+      case 'd': Deci      = atoi(optarg); break;
       case 'D': DualMode  = 1; break;
       default:
         printf("usage: %s [-f freq_hz] [-r rate_hz] [-g if_gain_reduction_dB] [-l lna_state]\n"
@@ -180,6 +182,7 @@ int main(int argc, char **argv)
         printf("  -o  write converted u8 I/Q here (feed to tools/spectrum.py)\n");
         printf("  -s  conversion shift,  default 8\n");
     printf("  -m  transfer mode: bulk (default) or isoch\n");
+    printf("  -d  on-chip decimation factor: 2, 4, 8, 16 or 32 (default 1 = off)\n");
     printf("  -D  dual-tuner mode: both tuners stream at once\n");
     printf("  -B  tuner B centre frequency, default -f + 100 kHz\n");
         return 2; } }
@@ -262,8 +265,20 @@ int main(int argc, char **argv)
   params->rxChannelA->tunerParams.gain.minGr     = sdrplay_api_NORMAL_MIN_GR;
   params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
 
-  printf("\ntuning      : %9.3f MHz, %5.3f MSps, IF gain reduction %d dB, LNA state %d\n",
-         FreqHz / 1e6, RateHz / 1e6, GainRedDB, LnaState);
+  /* On-chip decimation. The ADC cannot run below 2 MHz, so this is the only way to get a lower
+     output rate; asking for one directly makes Init() fail. */
+  if (Deci > 1)
+  { params->rxChannelA->ctrlParams.decimation.enable = 1;
+    params->rxChannelA->ctrlParams.decimation.decimationFactor = (unsigned char)Deci;
+    printf("decimation  : factor %d applied on chip\n", Deci); }
+  else
+  { params->rxChannelA->ctrlParams.decimation.enable = 0;
+    params->rxChannelA->ctrlParams.decimation.decimationFactor = 1; }
+
+  double OutRate = RateHz / (double)(Deci > 1 ? Deci : 1);
+  printf("\ntuning      : %9.3f MHz, %5.3f MSps%s, IF gain reduction %d dB, LNA state %d\n",
+         FreqHz / 1e6, OutRate / 1e6,
+         (Deci > 1) ? " (decimated on chip)" : "", GainRedDB, LnaState);
   printf("capturing   : %zu samples (%.2f s)\n", Requested, (double)Requested / RateHz);
 
   Capture C;
