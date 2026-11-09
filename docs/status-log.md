@@ -67,3 +67,62 @@ question of how to reach the hardware.
    2.000 MSps.
 5. Note: a clean run does not prove OGN decoding. That needs a transmitter in range, and this site
    has previously measured the 868 band as quiet.
+
+## Bring-up session 2 — verification of everything that does not need root
+
+The API install still has not run (the RSPduo node remains `root:root 0644` while the RTL-SDR and
+LimeSDR nodes carry `plugdev` rules), so this session verified everything that could be verified
+without it, and made the remaining step a single command.
+
+### Verified without root
+
+**The RSPduo branch does not regress the existing builds.** Built on the board with
+`USE_RSPDUO=0`, i.e. as an ordinary RTL-SDR/LimeSDR binary:
+
+```
+[exit=0]
+-rwxrwxr-x 1 threaded threaded 134512 ogn-rf
+ogn-rf: ELF 64-bit LSB shared object, ARM aarch64, ... dynamically linked
+```
+
+Every warning in that build is pre-existing (`ogn-rf.cc:937` literal-suffix, `sysmon.h`
+misleading-indentation, `ogn-rf.cc:284` format-overflow). None come from `rspduo.h` or `sdr.h`.
+
+**The code compiles on the target toolchain, not just locally.** `g++ (Ubuntu 9.4.0)`, aarch64,
+`-Wall -Wextra`, both consumers (`ogn-rf.cc`, `gsm_scan.cc`), exit 0, and:
+
+```
+=== which warnings are NEW (from rspduo.h / sdr.h)? ===
+(no output)
+```
+
+**The compile-time fallback works at runtime.** A binary built without `USE_RSPDUO`, given a
+configuration that asks for `rspduo`, prints:
+
+```
+SDR: RSPduo support was not compiled in (build with USE_RSPDUO=1)
+```
+
+and falls back to RTL-SDR. So a stale binary fails visibly rather than silently ignoring the
+setting — which was the point of the fallback.
+
+### One pre-existing oddity, recorded so it is not mistaken for a bug later
+
+`ogn-rf.cc:356` prints `SDR.Open(%d, , ) fails` — a format string with placeholders that have no
+arguments. The empty fields mean nothing; it is a pre-existing cosmetic defect in the branch
+inherited from `limesdr`, not a config-parsing failure.
+
+### What was produced
+
+`scripts/bootstrap-rspduo.sh` — one `sudo` command that installs the API, then drops back to the
+invoking user to run the probe, the spectrum capture, the ogn-rf build and a short ogn-rf run, and
+writes every measurement to `~/rspduo-bootstrap-report.txt`. Only the install needs root; the
+checks deliberately run as the user, which is how ogn-rf really runs.
+
+Rationale: the verification is only possible once the root-owned daemon exists, so splitting
+"install" and "verify" across two operator actions would waste a round trip. Steps 3-6 are
+best-effort so one run reports everything that is wrong instead of stopping at the first failure.
+
+### Still outstanding
+
+The same five steps as session 1 — they now all live behind the bootstrap script.

@@ -39,9 +39,20 @@ which is one command (below), and then a measurement.
 
 ## Quick start
 
+One command does the install and the whole verification, and leaves a report:
+
+```bash
+sudo ~/projects/RSPduo/rspduo/scripts/bootstrap-rspduo.sh
+cat ~/rspduo-bootstrap-report.txt
+```
+
+That is the recommended path. Only the install needs root, so the script drops back to your user
+for every check afterwards — which is also how ogn-rf really runs, as a normal user talking to the
+daemon rather than as root. The steps below are the same thing done by hand.
+
 ```bash
 # 1. install the SDRplay API (root - the daemon and the udev rule need it)
-sudo ~/rspduo-deps/install-sdrplay-api.sh
+sudo ~/projects/RSPduo/rspduo/scripts/install-sdrplay-api.sh
 
 # 2. is the device alive? This is independent of ogn-rf.
 ~/projects/RSPduo/rspduo/scripts/probe-rspduo.sh -o /tmp/868.u8
@@ -86,6 +97,7 @@ rspduo/
 │   ├── hardware.md                the device, the API, and the measurements behind the choices
 │   └── ogn-rf-integration.md      how the backend is wired in, and how to verify it
 ├── scripts/
+│   ├── bootstrap-rspduo.sh        install + verify the whole chain in one sudo command
 │   ├── install-sdrplay-api.sh     install the vendor API without the interactive installer
 │   ├── build-ogn-rf.sh            build ogn-rf with USE_RSPDUO
 │   ├── run-ogn-rf.sh              run it (handles the traps that make it look dead)
