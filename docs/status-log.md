@@ -609,3 +609,45 @@ merely an echo of the other.
 Not established: whether the *external* noise seen by two separate antennas is correlated. That
 depends on the antennas and their spacing, not on the receiver, and it decides how much diversity
 gain is actually available.
+
+## Bring-up session 12 — selection diversity implemented
+
+Asked for λ/2 vertical spacing and selection diversity. Both tuners now run on one frequency and
+the backend hands ogn-rf whichever saw more signal.
+
+| | |
+|---|---|
+| Wavelength at 868.3 MHz | 34.5 cm |
+| **λ/2 (vertical spacing to use)** | **17.3 cm** |
+| Decision metric | strongest 1024-sample block (1 ms), not the window mean |
+| Hysteresis | 1 dB |
+| Both tuners on | 868.300 MHz |
+| Measured result | A 5 / B 0 selections, Live Time 18.2 % |
+
+### Why the mean would have been wrong
+
+An OGN packet is a burst a few ms long inside an 0.85 s window. Averaging power over the whole
+window measures mostly noise, so the selection would have been deciding on nothing. The metric
+takes the strongest 1 ms block instead.
+
+### A bug I introduced and then found
+
+The rings were sized at 0.5 s of samples but ogn-rf reads 0.85 s. Because the two rings are
+drained sequentially — A blocks for its window while B is still filling — B overflowed its ring on
+every single read and had to be waited for again from scratch. Measured: 2 reads in 22 s, 9.1 %
+Live Time. Sizing the rings to 2 s fixed it: 18.2 %, which matches the plain dual-mode baseline,
+so the diversity overhead is now negligible.
+
+The general lesson is the one that keeps recurring here: a ring must hold a full reader window, and
+with two readers that window is effectively doubled.
+
+### Verified, and what is not
+
+The selection logic is covered by the unit test — the two callbacks are fed different amplitudes and
+the chosen stream is checked to be the loud one, then the roles are swapped. 51 checks pass.
+
+On the actual hardware tuner A wins every time. That is consistent with an antenna on tuner A's port
+only, which is the expected result rather than a fault — but it does mean real diversity gain has
+not been demonstrated, because that needs two antennas and a fade to observe. Vertical spacing of
+17.3 cm is the recommended arrangement; horizontal λ spacing should be avoided, since a two-element
+array at d = λ has lobes at broadside *and* endfire and nulls at ±30°.

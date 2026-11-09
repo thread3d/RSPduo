@@ -48,6 +48,7 @@
 static sdrplay_api_DeviceParamsT    StubParams;
 static sdrplay_api_DevParamsT       StubDevParams;
 static sdrplay_api_RxChannelParamsT StubChannelA;
+static sdrplay_api_RxChannelParamsT StubChannelB;
 
 /* Copied BY VALUE: see the note in the header comment. */
 static sdrplay_api_CallbackFnsT StubCbs;
@@ -90,8 +91,9 @@ sdrplay_api_ErrT sdrplay_api_GetDeviceParams(HANDLE dev, sdrplay_api_DeviceParam
   memset(&StubDevParams, 0, sizeof(StubDevParams));
   memset(&StubChannelA, 0, sizeof(StubChannelA));
   StubParams.devParams  = &StubDevParams;
+  memset(&StubChannelB, 0, sizeof(StubChannelB));
   StubParams.rxChannelA = &StubChannelA;
-  StubParams.rxChannelB = NULL;
+  StubParams.rxChannelB = &StubChannelB;
   if (deviceParams) *deviceParams = &StubParams;
   return sdrplay_api_Success; }
 
@@ -305,6 +307,62 @@ int main(void)
     check(b_ok, "tuner B carries its own stream, not A's");
 
     Dual.Close(); }
+
+  /* ----------------------------------------------------------------------------------------- */
+  printf("\nSelection diversity\n");
+  { /* Both tuners on one frequency; the stronger one must be the one handed to ogn-rf. This is
+       the check that matters, because a selection that always returns tuner A would look
+       perfectly healthy while providing no diversity at all. */
+    const unsigned int N = 1024;
+    uint8_t quiet[2 * N], loud[2 * N];
+
+    /* The metric itself first: a near-zero signal must not out-score a large one. */
+    memset(quiet, 128, sizeof(quiet));
+    for (unsigned int i = 0; i < 2 * N; i++) loud[i] = (uint8_t)(128 + ((i & 1) ? 100 : -100));
+    double pq = RSPDuo::BlockPeakPowerdB(quiet, (int)N, 256);
+    double pl = RSPDuo::BlockPeakPowerdB(loud,  (int)N, 256);
+    char what[128];
+    snprintf(what, sizeof(what), "quiet %.0f dB vs loud %.0f dB, loud scores higher", pq, pl);
+    check(pl > pq + 20.0, what);
+
+    RSPDuo Div;
+    Div.RspDuoMode = sdrplay_api_RspDuoMode_Dual_Tuner;
+    Div.setSelectionDiversity(1);
+    int ok = Div.Open(0, 868300000, 2000000);
+    check(ok > 0, "Open() succeeds with selection diversity requested");
+    check(Div.haveDiversity(), "diversity is active");
+    check(Div.getCenterFreqB() == Div.getCenterFreq(),
+          "both tuners are on the same frequency in diversity mode");
+
+    /* Feed A quietly and B loudly, then ask for a read: B must win. */
+    short qi[N], qq[N], li[N], lq[N];
+    /* Note the shift: 25000 >> 8 = 97, so 'loud' lands 97 counts from 128 while 'quiet'
+       stays at 0. 8000 would give only 31 and the assertion below would be wrong. */
+    for (unsigned int i = 0; i < N; i++) { qi[i] = 10; qq[i] = -10; li[i] = 25000; lq[i] = -25000; }
+    StubCbs.StreamACbFn(qi, qq, NULL, N, 0, StubCtx);
+    StubCbs.StreamBCbFn(li, lq, NULL, N, 0, StubCtx);
+
+    SampleBuffer<uint8_t> Out;
+    int got = Div.Read(Out, (int)N, 0);
+    check(got == (int)N, "a diversity read returns samples");
+    check(Div.getDivLastTuner() == 1, "tuner B wins when it is the stronger one");
+    check(Div.getDivChoseB() == 1, "the winner counter agrees");
+
+    /* The data handed back must be B's, not A's: B is large, A is tiny. */
+    int peak = 0;
+    for (unsigned int i = 0; i < (unsigned int)got; i++)
+    { int d = abs((int)Out.Data[2*i] - 128); if (d > peak) peak = d; }
+    snprintf(what, sizeof(what), "the returned buffer is tuner B's (peak deviation %d, not ~2)", peak);
+    check(peak > 50, what);
+
+    /* Now swap the roles: A loud, B quiet. It must move to A. */
+    Div.ResetBuffer();
+    StubCbs.StreamACbFn(li, lq, NULL, N, 0, StubCtx);
+    StubCbs.StreamBCbFn(qi, qq, NULL, N, 0, StubCtx);
+    Div.Read(Out, (int)N, 0);
+    check(Div.getDivLastTuner() == 0, "the choice follows the stronger tuner");
+    check(Div.getDivSwitches() >= 1, "the switch was counted");
+    Div.Close(); }
 
   /* ----------------------------------------------------------------------------------------- */
   printf("\nClose()\n");
