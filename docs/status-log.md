@@ -126,3 +126,38 @@ best-effort so one run reports everything that is wrong instead of stopping at t
 ### Still outstanding
 
 The same five steps as session 1 — they now all live behind the bootstrap script.
+
+## Bring-up session 3 — the ring-buffer bridge is now proven, without hardware
+
+Still no root, so still no hardware. Instead the riskiest code in the backend was attacked
+directly: the bridge from the SDRplay API's callback thread to ogn-rf's blocking `Read()` is the one
+part whose correctness cannot be established by the compiler, and it turns out not to need hardware
+to test.
+
+`tests/test_rspduo_ring.cxx` stubs the handful of `sdrplay_api_*` entry points that `rspduo.h`
+calls, captures the registered stream callback, and drives it directly.
+
+```
+25 checks, 0 failed
+```
+
+on x86-64 and again on the board with gcc 9.4. Covered: the int16 → u8 conversion including the 128
+offset and clamping at both rails, that I and Q land in the right bytes in the right order, that a
+mid-stream reset flushes the ring instead of splicing two configurations together, that an overrun
+is counted rather than corrupting the ring, and that `Read()` fails instead of hanging once the
+radio is closed.
+
+### Two things this turned up, both worth keeping
+
+- `Read()` rounds a requested count down to a multiple of 256, faithfully to `rtlsdr.h` and
+  `limesdr.h`. That is correct behaviour but a trap for tests: every request in the unit test asks
+  for a multiple of 256, and the first draft's small requests silently returned zero samples.
+- `rspduo.h` passes a **stack-local** `sdrplay_api_CallbackFnsT` to `sdrplay_api_Init()`. That is
+  right with the real library, which copies it — but the first draft of the stub saved the *pointer*
+  instead of the struct and was left with a dangling reference the moment `Open()` returned, which
+  segfaulted and looked exactly like a backend bug. The stub now copies by value, and the reason is
+  documented in the test header so nobody re-introduces it.
+
+### Still outstanding
+
+Unchanged, and it is one command: `sudo scripts/bootstrap-rspduo.sh`.

@@ -28,7 +28,8 @@ LimeSDR work:
 | Device identified | **confirmed** — USB `1DF7:3020` is the RSPduo |
 | SDRplay API installer | **written and verified** — SHA512 matches the upstream Arch package |
 | SDRplay API installed | **pending** — needs root; see below |
-| `rspduo` backend for ogn-rf | **written, compiles clean** (`-Wall -Wextra`, zero warnings) |
+| `rspduo` backend for ogn-rf | **written, compiles clean** (`-Wall -Wextra`, zero warnings on x86-64 and on the board's gcc 9.4) |
+| Ring-buffer bridge | **unit-tested** — 25 checks, 0 failed, on both hosts, no hardware needed |
 | Backend committed and pushed | **yes** — `thread3d/ogn-rf`, branch `rspduo` |
 | Conversion scale (`Shift = 8`) | **to be measured** — `rspduo_probe` reports what settles it |
 | ogn-rf runs on the RSPduo | **pending** the API install |
