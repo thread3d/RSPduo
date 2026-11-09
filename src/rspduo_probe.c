@@ -33,6 +33,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <time.h>
 
 #include <sdrplay_api.h>
 
@@ -59,9 +60,16 @@ typedef struct
   size_t   OutCount;
 
   int      Shift;          /* >>Shift then +128 */
+  double   TFirst;         /* wall clock at the first callback */
+  double   TLast;          /* wall clock at each callback */
+  size_t   NTimed;         /* samples covered by TFirst..TLast */
   long     ClippedLow;     /* samples that railed at 0 */
   long     ClippedHigh;    /* samples that railed at 255 */
 } Capture;
+
+static double now_sec(void)
+{ struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + 1e-9 * ts.tv_nsec; }
 
 static void stream_a_cb(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
                         unsigned int numSamples, unsigned int reset, void *cbContext)
@@ -70,6 +78,9 @@ static void stream_a_cb(short *xi, short *xq, sdrplay_api_StreamCbParamsT *param
   if (C == NULL || numSamples == 0) return;
 
   pthread_mutex_lock(&C->Lock);
+  if (C->RawCount == 0) C->TFirst = now_sec();
+  C->TLast = now_sec();
+  C->NTimed = C->RawCount + numSamples;
 
   for (unsigned int i = 0; i < numSamples; i++)
   { if (C->RawCount < C->RawCap)
@@ -127,9 +138,10 @@ int main(int argc, char **argv)
   size_t  Requested = 2000000;      /* samples, 1 s at 2 MSps */
   const char *OutPath = NULL;
   int     Shift     = 8;
+  int     BulkMode  = 1;
 
   int opt;
-  while ((opt = getopt(argc, argv, "f:r:g:l:n:o:s:h")) != -1)
+  while ((opt = getopt(argc, argv, "f:r:g:l:n:o:s:m:h")) != -1)
   { switch (opt)
     { case 'f': FreqHz    = atof(optarg); break;
       case 'r': RateHz    = atof(optarg); break;
@@ -138,6 +150,7 @@ int main(int argc, char **argv)
       case 'n': Requested = (size_t)strtoull(optarg, NULL, 0); break;
       case 'o': OutPath   = optarg; break;
       case 's': Shift     = atoi(optarg); break;
+      case 'm': BulkMode  = (strcmp(optarg, "isoch") != 0); break;
       default:
         printf("usage: %s [-f freq_hz] [-r rate_hz] [-g if_gain_reduction_dB] [-l lna_state]\n"
                "          [-n samples] [-o out.u8] [-s shift]\n", argv[0]);
@@ -148,6 +161,7 @@ int main(int argc, char **argv)
         printf("  -n  samples to capture,default 2000000\n");
         printf("  -o  write converted u8 I/Q here (feed to tools/spectrum.py)\n");
         printf("  -s  conversion shift,  default 8\n");
+    printf("  -m  transfer mode: bulk (default) or isoch\n");
         return 2; } }
 
   signal(SIGINT, on_signal); signal(SIGTERM, on_signal);
@@ -201,7 +215,7 @@ int main(int argc, char **argv)
   { printf("GetDeviceParams() failed\n"); sdrplay_api_ReleaseDevice(&dev); sdrplay_api_Close(); return 1; }
 
   params->devParams->fsFreq.fsHz          = RateHz;
-  params->devParams->mode                 = sdrplay_api_BULK;
+  params->devParams->mode                 = BulkMode ? sdrplay_api_BULK : sdrplay_api_ISOCH;
   params->rxChannelA->tunerParams.rfFreq.rfHz = FreqHz;
   params->rxChannelA->tunerParams.rfFreq.syncUpdate = 1;
   params->rxChannelA->tunerParams.bwType  = sdrplay_api_BW_1_536;
@@ -268,10 +282,52 @@ int main(int argc, char **argv)
     printf("raw Q       : min %6d  max %6d  mean %9.2f\n", qmin, qmax, sq);
 
     int peak = abs(imin) > abs(imax) ? abs(imin) : abs(imax);
-    printf("peak        : %d  (a full-scale 16-bit stream peaks near 32767)\n", peak);
+
+    /* RMS in dBFS, relative to the full 16-bit scale. This is the number that says whether the
+       gain is set sensibly: a well-scaled 8-bit stream wants to sit some way below 0 dBFS, and a
+       reading 20 dB low means four of the eight bits are being wasted. */
+    double sumsq = 0;
+    for (size_t i = 0; i < n; i++)
+      sumsq += (double)C.RawI[i] * (double)C.RawI[i] + (double)C.RawQ[i] * (double)C.RawQ[i];
+    double rms = sqrt(sumsq / (2.0 * (double)n));
+    double rms_db = 20.0 * log10(rms / 32768.0 + 1e-12);
+    printf("peak        : %d  (%.1f dBFS; a full-scale 16-bit stream peaks near 32767)\n",
+           peak, 20.0 * log10((double)peak / 32768.0 + 1e-12));
+    printf("rms         : %.1f  (%.1f dBFS)\n", rms, rms_db);
+    printf("headroom    : %.1f dB of the 8-bit range unused above this signal\n",
+           -(20.0 * log10((double)peak / 32768.0 + 1e-12)));
+
+    /* The rate actually delivered. A stream that runs slow here starves ogn-rf's time-slot
+       reader, which shows up there as "Half time slot" and "Dropped a slot" rather than as
+       anything obviously about sample rate. */
+    double Span = C.TLast - C.TFirst;
+    if (Span > 0.01)
+      printf("rate        : %.3f Msps delivered (%.3f Msps requested, %+.1f%%)\n",
+             (double)C.NTimed / Span / 1e6, RateHz / 1e6,
+             100.0 * ((double)C.NTimed / Span / RateHz - 1.0));
+
+    /* Quantisation: which low bits are always zero. This settles the conversion scale outright,
+       which the peak alone cannot do - a weak signal also has a small peak. If every value is a
+       multiple of 16 the stream is 12-bit shifted left by 4; a multiple of 4 means 14-bit shifted
+       by 2; arbitrary values mean the full 16-bit scale. */
+    int mult2=1, mult4=1, mult16=1;
+    for (size_t i = 0; i < n; i++)
+    { int v = C.RawI[i]; if (v < 0) v = -v;
+      if (v & 1)  mult2  = 0;
+      if (v & 3)  mult4  = 0;
+      if (v & 15) mult16 = 0;
+      if (!mult2) break; }
+    printf("quantise    : values all even=%s, all multiple of 4=%s, all multiple of 16=%s\n",
+           mult2 ? "yes" : "no", mult4 ? "yes" : "no", mult16 ? "yes" : "no");
     printf("shift %d    : %s\n", C.Shift,
-           peak > 16384 ? "samples look left-justified in 16 bits - consistent with shift 8"
-                        : "samples do NOT fill 16 bits; the shift may need lowering");
+           mult16 ? "12-bit data left-justified - shift 8 is correct"
+         : mult4  ? "14-bit data left-justified - shift 8 is correct"
+         : mult2  ? "15-bit data left-justified - shift 8 is correct"
+         :          "full 16-bit scale in use - shift 8 is correct");
+    if (peak < 16384)
+      printf("              NOTE: this capture is %.1f dB below full scale, so raise the gain;\n"
+             "              the unused low bits above are lost resolution, not a scale error\n",
+             -(20.0 * log10((double)peak / 32768.0 + 1e-12)));
 
     long clipped = C.ClippedLow + C.ClippedHigh;
     if (OutPath)

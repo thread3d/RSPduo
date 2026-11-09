@@ -214,8 +214,12 @@ echo "====================== verification ======================"
 fail=0
 
 echo "-- library"
-if ldconfig -p | grep -q libsdrplay_api; then
-  ldconfig -p | grep libsdrplay_api | sed 's/^/   /'
+# Note: do NOT write this as "ldconfig -p | grep -q ...". Under "set -o pipefail" that is a false
+# negative: grep -q exits on the first match, ldconfig is killed by SIGPIPE (141), and the pipeline
+# reports failure even though the library is there. Read the whole output into a variable instead.
+lib_hits=$(ldconfig -p 2>/dev/null | grep -F libsdrplay_api || true)
+if [ -n "$lib_hits" ]; then
+  echo "$lib_hits" | sed 's/^/   /'
 else
   echo "   MISSING: libsdrplay_api not in the linker cache"; fail=1
 fi
@@ -232,7 +236,17 @@ fi
 systemctl is-enabled sdrplay 2>&1 | sed 's/^/   enabled: /'
 
 echo "-- process"
-pgrep -a sdrplay_apiService | sed 's/^/   /' || { echo "   no sdrplay_apiService process"; fail=1; }
+# pgrep matches the kernel's task name, which is truncated to 15 characters: "sdrplay_apiServ".
+# Asking for the full 18-character name therefore never matches, however healthy the daemon is.
+# Matching the full command line with -f avoids that trap.
+# pidof compares the executable's basename, so it matches the full name without the 15-char
+# truncation trap, and unlike "pgrep -f <path>" it cannot match the shell running this check.
+daemon_pids=$(pidof sdrplay_apiService || true)
+if [ -n "$daemon_pids" ]; then
+  for pid in $daemon_pids; do echo "   pid $pid"; done
+else
+  echo "   no sdrplay_apiService process"; fail=1
+fi
 
 echo "-- USB device"
 if lsusb -d 1df7:3020 >/dev/null 2>&1; then
@@ -241,17 +255,20 @@ else
   echo "   RSPduo (1df7:3020) not present on the bus"; fail=1
 fi
 echo "-- device-node permissions (what non-root callers may open)"
-node_perm_ok=0
+# Report only the SDRplay (vendor 1df7) nodes. Scanning every node on the bus and printing the 0666
+# ones fills the output with unrelated dongles and says nothing about this device.
+found_sdr=0
 for node in /dev/bus/usb/*/*; do
   [ -e "$node" ] || continue
-  # only the SDRplay nodes matter; the 3020 one is the RSPduo
-  perm="$(stat -c '%a %U:%G' "$node" 2>/dev/null)" || continue
-  case "$perm" in
-    666*) echo "   $node  $perm"; node_perm_ok=1 ;;
-  esac
+  vid=$(udevadm info -q property -n "$node" 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p' | head -1)
+  [ "$vid" = "1df7" ] || continue
+  model=$(udevadm info -q property -n "$node" 2>/dev/null | sed -n 's/^ID_MODEL=//p' | head -1)
+  perm=$(stat -c '%a %U:%G' "$node" 2>/dev/null)
+  echo "   $node  ${model:-SDRplay}  $perm"
+  found_sdr=1
 done
-if [ "$node_perm_ok" -eq 0 ]; then
-  echo "   NOTE: no 0666 node seen yet; unplug and re-plug the RSPduo so udev re-applies"
+if [ "$found_sdr" -eq 0 ]; then
+  echo "   NOTE: no SDRplay (1df7) device node found; check lsusb and re-plug the device"
 fi
 
 echo

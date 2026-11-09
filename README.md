@@ -25,18 +25,27 @@ LimeSDR work:
 
 | Item | State |
 |---|---|
-| Device identified | **confirmed** — USB `1DF7:3020` is the RSPduo |
+| Device identified | **confirmed** — USB `1DF7:3020` is the RSPduo, serial 190507CB32 |
 | SDRplay API installer | **written and verified** — SHA512 matches the upstream Arch package |
-| SDRplay API installed | **pending** — needs root; see below |
-| `rspduo` backend for ogn-rf | **written, compiles clean** (`-Wall -Wextra`, zero warnings on x86-64 and on the board's gcc 9.4) |
+| SDRplay API installed | **done** — daemon active, udev rule and hwdb in place |
+| `rspduo` backend for ogn-rf | **working on hardware** — opens, tunes, streams |
 | Ring-buffer bridge | **unit-tested** — 25 checks, 0 failed, on both hosts, no hardware needed |
 | Backend committed and pushed | **yes** — `thread3d/ogn-rf`, branch `rspduo` |
-| Conversion scale (`Shift = 8`) | **to be measured** — `rspduo_probe` reports what settles it |
-| ogn-rf runs on the RSPduo | **pending** the API install |
-| Live OGN packet decoding | **not yet** — needs a transmitter in range, as with any OGN receiver |
+| Conversion scale (`Shift = 8`) | **measured and confirmed** — peak −3.0 dBFS, zero clipping, full 16-bit scale in use |
+| Gain law | **measured** — total = 115.8 − gRdB at LNA 0, i.e. 56.8–95.8 dB |
+| Delivered sample rate | **2.017 Msps** for 2.000 requested (+0.8 %) |
+| Real RF confirmed | **yes** — FM broadcast at 100 MHz, +33.9 dB over the noise floor |
+| ogn-rf runs on the RSPduo | **yes** — status page reports RSPduo, 868.300 MHz, 2.000 MHz |
+| Live OGN packet decoding | **not yet** — 868 MHz measures as quiet here; see below |
 
-The chain up to "compiles and is wired in correctly" is done. What remains needs the API installed,
-which is one command (below), and then a measurement.
+The chain is verified end to end on hardware. What is still missing is an OGN transmitter in range:
+at maximum gain both OGN channels sit on the noise floor (+0.1 dB at 868.200, +0.3 dB at 868.400),
+exactly as the LimeSDR work found on this site. That is the nature of OGN rather than a fault — see
+[`docs/status-log.md`](docs/status-log.md) for the measurements.
+
+One thing that looks alarming and is not: ogn-rf reports "Half time slot" and "Dropped a slot", and
+a Live Time of 33 %. Run the working LimeSDR build as a control and it reports **the same 33.3 %**
+with the same counts, so that is this machine and configuration, not this backend.
 
 ## Quick start
 
@@ -118,7 +127,9 @@ rspduo/
 | Single-tuner sample rates | 2, 6, 8 MHz | API, enforced by `SnapSampleRate()` |
 | OGN channels (Europe) | 868.200 / 868.400 MHz | 100 kHz either side of a 868.300 centre |
 | Analog bandwidth used | 1.536 MHz | widest filter below a 2 MSps stream |
-| Conversion | `(x >> 8) + 128`, clamped | same as the LimeSDR backend; measured by the probe |
+| Conversion | `(x >> 8) + 128`, clamped | measured: −3.0 dBFS peak, zero clipping, full 16-bit scale |
+| Gain law | total = 115.8 − gRdB at LNA 0 | measured sweep, see `docs/hardware.md` |
+| Delivered rate | 2.017 Msps for 2.000 asked | measured between first and last callback |
 | Ring buffer | 2 MiB = 1 M samples | 0.5 s at 2 MSps, absorbs scheduling jitter |
 
 ## Notes on the reference implementations

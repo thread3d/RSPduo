@@ -85,11 +85,21 @@ else
   systemctl status sdrplay --no-pager 2>&1 | head -20 | sed 's/^/    /' | tee -a "$REPORT"
   FAILED=1
 fi
-if ldconfig -p 2>/dev/null | grep -q libsdrplay_api; then
+# "ldconfig -p | grep -q" is a false negative under pipefail (SIGPIPE on ldconfig), so read it all.
+lib_hits=$(ldconfig -p 2>/dev/null | grep -F libsdrplay_api || true)
+if [ -n "$lib_hits" ]; then
   say "PASS: libsdrplay_api is in the linker cache"
-  ldconfig -p | grep libsdrplay_api | sed 's/^/    /' | tee -a "$REPORT"
+  echo "$lib_hits" | sed 's/^/    /' | tee -a "$REPORT"
 else
   say "FAIL: libsdrplay_api is not in the linker cache"
+  FAILED=1
+fi
+# The daemon's task name is truncated to 15 chars ("sdrplay_apiServ"), so match the command line.
+daemon_pids=$(pidof sdrplay_apiService || true)
+if [ -n "$daemon_pids" ]; then
+  say "PASS: the API daemon is running (pid $(echo $daemon_pids | tr ' ' ','))"
+else
+  say "FAIL: no sdrplay_apiService process, although the unit may report active"
   FAILED=1
 fi
 say "device seen by the bus:"
