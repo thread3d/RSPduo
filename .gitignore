@@ -1,0 +1,23 @@
+# Build output
+*.o
+/ogn-rf
+/gsm_scan
+/r2fft_test
+/rspduo_probe
+
+# Captures and measurements: regenerable, and large
+/captures/
+*.iq
+*.raw
+*.wav
+*.png
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor / OS noise
+*~
+.DS_Store
