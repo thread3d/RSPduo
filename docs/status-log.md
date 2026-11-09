@@ -274,3 +274,70 @@ property of this machine and configuration, not of the RSPduo code.
   that there is no crystal-trim interface. Cosmetic.
 - `GRdB_set` starts at maximum gain in the constructor, so the stream opens at 95.8 dB and
   `setTunerGain()` settles it moments later once ogn-rf has read `RF.OGN.Gain`.
+
+## Bring-up session 5 — both tuners working
+
+`RF.RSPduo.DualTuner = 1` now runs both RSPduo tuners at once. Verified on the hardware, and the
+two failure modes that make dual mode look like it works when it does not were both checked for.
+
+### The constraints are real and are enforced
+
+Dual mode is much stricter than single-tuner mode. It is not a matter of turning a second stream
+on: the API accepts only a fixed set of (ADC rate, bandwidth, IF, internal decimation)
+combinations, and **`IF_Zero` is not one of them** — IF_Zero is the entire basis of the
+single-tuner configuration here. At a 2 MHz ADC:
+
+| Bandwidth | IF | Decimation | Output per tuner |
+|---|---|---|---|
+| 0.200 MHz | 450 kHz | 4 | 500 ksps |
+| 0.300 MHz | 450 kHz | 4 | 500 ksps |
+| 0.600 MHz | 450 kHz | 2 | 1000 ksps |
+
+The default is 0.6 MHz because the two European OGN channels are 200 kHz apart: a 0.2 MHz filter
+centred between them sits on neither.
+
+### The trap: Init() resets channel B
+
+`sdrplay_api_Init()` resets channel B's settings to channel A's. Tuner B's frequency therefore has
+to be written *after* `Init()` returns and pushed down with a `sdrplay_api_Update()` on
+`sdrplay_api_Tuner_B`. Doing it before `Init()` leaves both tuners on the same band — which streams
+perfectly happily, reports two channels, and receives the same spectrum twice.
+
+So independence was tested the only way that proves anything: put the tuners on bands with
+obviously different content and compare their spectra.
+
+```
+tuner A  99.592 MHz: strongest bin +16.9 dB over the noise floor   (FM broadcast)
+tuner B 433.920 MHz: strongest bin  +1.3 dB over the noise floor   (nothing)
+```
+
+If channel B had been left on A's frequency, B would have shown the same 16.9 dB FM signal.
+
+### What ogn-rf reports
+
+```
+RSPduo::Open() => dual-tuner mode: 2.000 MHz ADC, bw 600 kHz, IF 450 kHz, decimate by 2 => 1.000 Msps per tuner
+RSPduo::Open() => tuner B tuned to  868.400 MHz (channel B re-applied after Init)
+RSPduo::Open() => tuner A  868.300 MHz + tuner B both streaming,    1.000 Msps, ...
+```
+
+and the status page carries both:
+
+```
+Center frequency      868.300 MHz
+Sample rate           1.000 MHz
+Tuner B (dual mode)   868.400 MHz
+```
+
+Live Time drops to 16.7 % in dual mode against 33.3 % single. That is not a dual-mode defect: the
+demodulator is reading 1 Msps per slot instead of 2, so it processes fewer complete slots on this
+machine. Single-tuner mode remains the better default for ogn-rf; dual mode is for using the
+second tuner.
+
+### Code
+
+The ring buffer became `RSPDuo_Ring`, one instance per tuner, each with its own lock, condition
+variable and overrun count, so a slow reader on one cannot stall the other. `Read()` and
+`ResetBuffer()` take a tuner index, defaulting to 0 (A). The unit test grew a dual-mode section
+that feeds the A and B callbacks different patterns and confirms each is read back separately —
+that is the check which would catch the channel-B reset being mishandled without hardware.

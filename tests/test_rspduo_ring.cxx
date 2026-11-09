@@ -222,7 +222,7 @@ int main(void)
   /* ----------------------------------------------------------------------------------------- */
   printf("\nOverrun is counted, not silently swallowed\n");
   { Radio.ResetBuffer();
-    uint64_t before = Radio.Overflows;
+    uint64_t before = Radio.getOverflows(0);
 
     /* The ring is 2 MiB = 1 M samples. Push 4 x 300k = 1.2 M samples through it, which cannot
        fit, so the callback must drop and count rather than corrupt. */
@@ -234,7 +234,7 @@ int main(void)
     if (allocated)
     { fill(xi, xq, BLOCK, 0, 0);
       for (int b = 0; b < 4; b++) feed(xi, xq, BLOCK, 0);
-      check(Radio.Overflows > before, "the overrun was counted in Overflows");
+      check(Radio.getOverflows(0) > before, "the overrun was counted in Overflows");
 
       uint8_t buf[2 * 256];
       memset(buf, 0xAA, sizeof(buf));
@@ -245,10 +245,49 @@ int main(void)
     free(xi); free(xq); }
 
   /* ----------------------------------------------------------------------------------------- */
+  printf("\nDual mode: both tuners stream independently\n");
+  { /* The whole point of dual mode is that the two rings are independent. Drive the A callback
+       with one pattern and the B callback with another, and confirm each is read back separately -
+       which is what would fail if the API's post-Init channel B reset were not handled. */
+    RSPDuo Dual;
+    Dual.RspDuoMode = sdrplay_api_RspDuoMode_Dual_Tuner;
+    int ok = Dual.Open(0, 868200000, 2000000);
+    check(ok > 0, "Open() succeeds in dual-tuner mode");
+    check(Dual.haveTunerB(), "the backend reports tuner B as live");
+    check(StubHaveCbs && StubCbs.StreamBCbFn != NULL, "a separate tuner B callback was registered");
+    check(Dual.getCenterFreqB() != 0, "tuner B has its own centre frequency");
+
+    const unsigned int N = 256;
+    short ai[N], aq[N], bi[N], bq[N];
+    for (unsigned int i = 0; i < N; i++) { ai[i] = (short)(((int)i - 128) << 8); aq[i] = 0; }
+    for (unsigned int i = 0; i < N; i++) { bi[i] = (short)(((int)127 - i) << 8); bq[i] = 0; }
+
+    /* Feed both callbacks: A counts up, B counts down. */
+    StubCbs.StreamACbFn(ai, aq, NULL, N, 0, StubCtx);
+    StubCbs.StreamBCbFn(bi, bq, NULL, N, 0, StubCtx);
+
+    uint8_t abuf[2 * N], bbuf[2 * N];
+    memset(abuf, 0xAA, sizeof(abuf)); memset(bbuf, 0xAA, sizeof(bbuf));
+    int ga = Dual.Read(abuf, (int)N, 0);
+    int gb = Dual.Read(bbuf, (int)N, 1);
+    check(ga == (int)N, "tuner A delivers its samples");
+    check(gb == (int)N, "tuner B delivers its samples");
+
+    int a_ok = 1, b_ok = 1;
+    for (unsigned int i = 0; i < N; i++)
+    { if (abuf[2*i] != (uint8_t)i) a_ok = 0;
+      if (bbuf[2*i] != (uint8_t)(255 - (int)i)) b_ok = 0; }
+    check(a_ok, "tuner A carries its own stream, not B's");
+    check(b_ok, "tuner B carries its own stream, not A's");
+
+    Dual.Close(); }
+
+  /* ----------------------------------------------------------------------------------------- */
   printf("\nClose()\n");
+  int uninit_before = StubUninitCalls;
   Radio.Close();
   check(!Radio.isOpen(), "the backend reports itself closed");
-  check(StubUninitCalls == 1, "sdrplay_api_Uninit() was called exactly once");
+  check(StubUninitCalls == uninit_before + 1, "sdrplay_api_Uninit() was called exactly once");
   { uint8_t buf[2 * 256];
     check(Radio.Read(buf, 256) < 0, "Read() on a closed radio fails instead of hanging"); }
 

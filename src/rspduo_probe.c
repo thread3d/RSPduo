@@ -67,15 +67,12 @@ typedef struct
   long     ClippedHigh;    /* samples that railed at 255 */
 } Capture;
 
-static double now_sec(void)
-{ struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec + 1e-9 * ts.tv_nsec; }
+/* Both tuners use the same callback body; which Capture it fills is what differs. The API's
+   stream callbacks carry no user tuner tag of their own, so there is one wrapper per tuner. */
+static double now_sec(void);
 
-static void stream_a_cb(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
-                        unsigned int numSamples, unsigned int reset, void *cbContext)
-{ (void)params; (void)reset;
-  Capture *C = (Capture *)cbContext;
-  if (C == NULL || numSamples == 0) return;
+static void capture_push(Capture *C, short *xi, short *xq, unsigned int numSamples)
+{ if (C == NULL || numSamples == 0) return;
 
   pthread_mutex_lock(&C->Lock);
   if (C->RawCount == 0) C->TFirst = now_sec();
@@ -94,8 +91,25 @@ static void stream_a_cb(short *xi, short *xq, sdrplay_api_StreamCbParamsT *param
       C->Out[C->OutCount++] = (uint8_t)vq; } }
 
   pthread_cond_signal(&C->Cond);
-  pthread_mutex_unlock(&C->Lock);
-}
+  pthread_mutex_unlock(&C->Lock); }
+
+/* Filled by main once the tuner B Capture exists, so the free function below can reach it
+   without the callback signature changing. */
+static Capture *CaptureBPtr = NULL;
+
+static double now_sec(void)
+{ struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + 1e-9 * ts.tv_nsec; }
+
+static void stream_a_cb(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
+                        unsigned int numSamples, unsigned int reset, void *cbContext)
+{ (void)params; (void)reset;
+  capture_push((Capture *)cbContext, xi, xq, numSamples); }
+
+static void stream_b_cb(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params,
+                        unsigned int numSamples, unsigned int reset, void *cbContext)
+{ (void)params; (void)reset; (void)cbContext;
+  capture_push(CaptureBPtr, xi, xq, numSamples); }
 
 static void event_cb(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tuner,
                      sdrplay_api_EventParamsT *params, void *cbContext)
@@ -139,9 +153,11 @@ int main(int argc, char **argv)
   const char *OutPath = NULL;
   int     Shift     = 8;
   int     BulkMode  = 1;
+  int     DualMode  = 0;          /* -D: drive both tuners simultaneously */
+  double  FreqB     = 0.0;        /* -B: tuner B centre, default FreqHz + 100 kHz */
 
   int opt;
-  while ((opt = getopt(argc, argv, "f:r:g:l:n:o:s:m:h")) != -1)
+  while ((opt = getopt(argc, argv, "f:r:g:l:n:o:s:m:B:Dh")) != -1)
   { switch (opt)
     { case 'f': FreqHz    = atof(optarg); break;
       case 'r': RateHz    = atof(optarg); break;
@@ -151,6 +167,8 @@ int main(int argc, char **argv)
       case 'o': OutPath   = optarg; break;
       case 's': Shift     = atoi(optarg); break;
       case 'm': BulkMode  = (strcmp(optarg, "isoch") != 0); break;
+      case 'B': FreqB     = atof(optarg); break;
+      case 'D': DualMode  = 1; break;
       default:
         printf("usage: %s [-f freq_hz] [-r rate_hz] [-g if_gain_reduction_dB] [-l lna_state]\n"
                "          [-n samples] [-o out.u8] [-s shift]\n", argv[0]);
@@ -162,6 +180,8 @@ int main(int argc, char **argv)
         printf("  -o  write converted u8 I/Q here (feed to tools/spectrum.py)\n");
         printf("  -s  conversion shift,  default 8\n");
     printf("  -m  transfer mode: bulk (default) or isoch\n");
+    printf("  -D  dual-tuner mode: both tuners stream at once\n");
+    printf("  -B  tuner B centre frequency, default -f + 100 kHz\n");
         return 2; } }
 
   signal(SIGINT, on_signal); signal(SIGTERM, on_signal);
@@ -201,8 +221,21 @@ int main(int argc, char **argv)
     sdrplay_api_Close(); return 1; }
 
   sdrplay_api_DeviceT dev = devices[0];
-  dev.tuner          = sdrplay_api_Tuner_A;
-  dev.rspDuoMode     = sdrplay_api_RspDuoMode_Single_Tuner;
+  /* In dual mode the API demands Tuner_Both, Dual_Tuner mode, and rspDuoSampleFreq set before
+     the device is selected; a valid (rate, bandwidth, IF, decimation) combination is also
+     required, and IF_Zero is not among them. */
+  sdrplay_api_Bw_MHzT DualBw = sdrplay_api_BW_0_600;
+  sdrplay_api_If_kHzT DualIf = sdrplay_api_IF_0_450;
+  int                 DualDec = 2;
+  double              DualFs  = 2000000.0;
+  if (DualMode)
+  { if (FreqB == 0.0) FreqB = FreqHz + 100e3;
+    dev.tuner          = sdrplay_api_Tuner_Both;
+    dev.rspDuoMode     = sdrplay_api_RspDuoMode_Dual_Tuner;
+    dev.rspDuoSampleFreq = DualFs; }
+  else
+  { dev.tuner          = sdrplay_api_Tuner_A;
+    dev.rspDuoMode     = sdrplay_api_RspDuoMode_Single_Tuner; }
   dev.rspDuoSampleFreq = 0.0;
 
   err = sdrplay_api_SelectDevice(&dev);
@@ -214,12 +247,16 @@ int main(int argc, char **argv)
   if (err != sdrplay_api_Success || params == NULL)
   { printf("GetDeviceParams() failed\n"); sdrplay_api_ReleaseDevice(&dev); sdrplay_api_Close(); return 1; }
 
-  params->devParams->fsFreq.fsHz          = RateHz;
+  if (DualMode)
+  { params->devParams->fsFreq.fsHz = DualFs;
+    RateHz = DualFs / (double)DualDec;       /* what each tuner actually delivers */ }
+  else
+  { params->devParams->fsFreq.fsHz          = RateHz; }
   params->devParams->mode                 = BulkMode ? sdrplay_api_BULK : sdrplay_api_ISOCH;
   params->rxChannelA->tunerParams.rfFreq.rfHz = FreqHz;
   params->rxChannelA->tunerParams.rfFreq.syncUpdate = 1;
-  params->rxChannelA->tunerParams.bwType  = sdrplay_api_BW_1_536;
-  params->rxChannelA->tunerParams.ifType  = sdrplay_api_IF_Zero;
+  params->rxChannelA->tunerParams.bwType  = DualMode ? DualBw : sdrplay_api_BW_1_536;
+  params->rxChannelA->tunerParams.ifType  = DualMode ? DualIf : sdrplay_api_IF_Zero;
   params->rxChannelA->tunerParams.gain.gRdB      = GainRedDB;
   params->rxChannelA->tunerParams.gain.LNAstate  = (unsigned char)LnaState;
   params->rxChannelA->tunerParams.gain.minGr     = sdrplay_api_NORMAL_MIN_GR;
@@ -243,21 +280,58 @@ int main(int argc, char **argv)
   if (!C.RawI || !C.RawQ || (OutPath && !C.Out))
   { printf("out of memory for %zu samples\n", Requested); return 1; }
 
+  /* Tuner B gets its own capture, sized like A, so the two never share state. */
+  Capture CB;
+  memset(&CB, 0, sizeof(CB));
+  pthread_mutex_init(&CB.Lock, NULL);
+  pthread_cond_init(&CB.Cond, NULL);
+  if (DualMode)
+  { CB.RawCap = Requested;
+    CB.RawI   = (short *)malloc(Requested * sizeof(short));
+    CB.RawQ   = (short *)malloc(Requested * sizeof(short));
+    CB.Shift  = Shift;
+    if (OutPath) { CB.OutCap = 2 * Requested; CB.Out = (uint8_t *)malloc(CB.OutCap); }
+    if (!CB.RawI || !CB.RawQ || (OutPath && !CB.Out))
+    { printf("out of memory for tuner B\n"); return 1; }
+    CaptureBPtr = &CB; }
+
   sdrplay_api_CallbackFnsT cbs;
   cbs.StreamACbFn = stream_a_cb;
   cbs.StreamBCbFn = NULL;
   cbs.EventCbFn   = event_cb;
+
+  if (DualMode) cbs.StreamBCbFn = stream_b_cb;
 
   err = sdrplay_api_Init(dev.dev, &cbs, &C);
   if (err != sdrplay_api_Success)
   { printf("Init() failed: %s\n", sdrplay_api_GetErrorString(err));
     sdrplay_api_ReleaseDevice(&dev); sdrplay_api_Close(); return 1; }
 
+  /* sdrplay_api_Init() resets channel B to channel A's settings, so tuner B's own frequency has
+     to be written after Init and pushed down with a tuner-B update. Without this both tuners
+     receive the same band and dual mode looks like it works while proving nothing. */
+  if (DualMode)
+  { params->rxChannelB->tunerParams.rfFreq.rfHz = FreqB;
+    err = sdrplay_api_Update(dev.dev, sdrplay_api_Tuner_B,
+                             sdrplay_api_Update_Tuner_Frf, sdrplay_api_Update_Ext1_None);
+    if (err != sdrplay_api_Success)
+    { printf("sdrplay_api_Update(Tuner_B) failed: %s\n", sdrplay_api_GetErrorString(err));
+      sdrplay_api_Uninit(dev.dev); sdrplay_api_ReleaseDevice(&dev); sdrplay_api_Close(); return 1; }
+    printf("tuner B     : %9.3f MHz (re-applied after Init)\n", FreqB / 1e6); }
+
   /* Wait for the capture to fill, but never forever. */
   pthread_mutex_lock(&C.Lock);
   while (C.RawCount < C.RawCap && !Stop)
     pthread_cond_wait(&C.Cond, &C.Lock);
   pthread_mutex_unlock(&C.Lock);
+
+  /* In dual mode both tuners have to fill, and they are separate condition variables, so wait on
+     B separately rather than assuming A finishing means B did too. */
+  if (DualMode)
+  { pthread_mutex_lock(&CB.Lock);
+    while (CB.RawCount < CB.RawCap && !Stop)
+      pthread_cond_wait(&CB.Cond, &CB.Lock);
+    pthread_mutex_unlock(&CB.Lock); }
 
   sdrplay_api_Uninit(dev.dev);
 
@@ -343,6 +417,40 @@ int main(int argc, char **argv)
         printf("wrote       : %zu bytes of interleaved u8 I/Q to %s\n", wrote, OutPath);
         printf("              analyse with:  python3 tools/spectrum.py %s --rate %.0f --freq %.0f\n",
                OutPath, RateHz, FreqHz); } } }
+
+  /* In dual mode, show that the second tuner really streamed and what it carried. Two tuners on
+     the same frequency would produce the same statistics, which is exactly the failure mode the
+     post-Init reconfiguration exists to avoid, so report both explicitly. */
+  if (DualMode)
+  { size_t nb = CB.RawCount;
+    printf("\n--- tuner B (%9.3f MHz) ---\n", FreqB / 1e6);
+    printf("captured    : %zu samples\n", nb);
+    if (nb == 0)
+      printf("  -> nothing arrived on tuner B\n");
+    else
+    { int bimin = CB.RawI[0], bimax = CB.RawI[0];
+      double bsumsq = 0;
+      for (size_t i = 0; i < nb; i++)
+      { int v = CB.RawI[i]; if (v < bimin) bimin = v; if (v > bimax) bimax = v;
+        bsumsq += (double)CB.RawI[i]*(double)CB.RawI[i] + (double)CB.RawQ[i]*(double)CB.RawQ[i]; }
+      int bpeak = abs(bimin) > abs(bimax) ? abs(bimin) : abs(bimax);
+      double brms = sqrt(bsumsq / (2.0 * (double)nb));
+      printf("raw I       : min %6d  max %6d\n", bimin, bimax);
+      printf("peak        : %d  (%.1f dBFS)\n", bpeak, 20.0*log10((double)bpeak/32768.0+1e-12));
+      printf("rms         : %.1f  (%.1f dBFS)\n", brms, 20.0*log10(brms/32768.0+1e-12));
+      double span_b = CB.TLast - CB.TFirst;
+      if (span_b > 0.01)
+        printf("rate        : %.3f Msps delivered\n", (double)CB.NTimed / span_b / 1e6); }
+    if (OutPath && CB.Out)
+    { char bpath[1024];
+      snprintf(bpath, sizeof(bpath), "%s.B.u8", OutPath);
+      FILE *bf = fopen(bpath, "wb");
+      if (bf) { fwrite(CB.Out, 1, CB.OutCount, bf); fclose(bf);
+                printf("\ntuner B I/Q written to %s\n", bpath);
+                printf("  analyse with: python3 tools/spectrum.py %s --rate %.0f --freq %.0f\n",
+                       bpath, RateHz, FreqB); } }
+    free(CB.Out); free(CB.RawI); free(CB.RawQ);
+    pthread_mutex_destroy(&CB.Lock); pthread_cond_destroy(&CB.Cond); }
 
   sdrplay_api_ReleaseDevice(&dev);
   sdrplay_api_Close();
