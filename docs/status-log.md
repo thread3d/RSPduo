@@ -469,3 +469,58 @@ decimator is fed by the data that actually crossed the bus (5.480 / 32 = 0.171).
 
 So the practical ceiling on this machine is the 2 MHz ADC rate, which is what both the single-tuner
 and dual-tuner configurations use.
+
+## Bring-up session 9 — the decimation is NOT on the chip
+
+Asked to check that on-chip decimation is not possible. It is worse than that: everything I wrote
+about decimation happening "on chip" was an assumption, repeated across this repository and the
+rspduo branch, and it is **wrong**. Two independent measurements contradict it.
+
+### Evidence 1: the daemon's CPU does not care about the factor
+
+`sdrplay_apiService` is the process that owns USB. If the chip decimated, the daemon would receive
+32x fewer samples at factor 32 and its work would collapse. Over ten-second windows, idle accounted
+for:
+
+| | Delivered | Daemon CPU (net of idle) |
+|---|---|---|
+| factor 1 | 2.004 Msps | 0.61 s |
+| factor 32 | 0.063 Msps | 0.56 s |
+
+32x less output, the same work. The daemon is handling the same volume of samples either way.
+
+### Evidence 2: an under-running ADC rate is not rescued by the factor
+
+At an 8 MHz ADC, the bus cannot sustain the stream and delivers 5.48 Msps instead of 8. With a
+factor of 32 the arithmetic says 250 ksps. Measured: **168 ksps**. That is 5.48 / 32 = 0.171 — the
+stream is limited at full rate *before* the factor is applied, which cannot happen if the chip were
+producing a decimated 250 ksps stream that needed only 1 MB/s of USB.
+
+### What this means
+
+- **Decimation does not save USB bandwidth.** The full-rate stream still crosses USB; only the rate
+  handed to the client shrinks. It cannot be used to relieve a contended bus.
+- It also cannot recover the shortfall of an under-running ADC rate.
+- The rate reduction happens after the USB link, in the host-side API software.
+
+What would settle it beyond doubt is a USB-level capture: `modprobe usbmon` then `tcpdump -i
+usbmon0`, which needs root. That would show directly whether 32x decimation drops the traffic from
+8 MB/s to 0.25 MB/s. It has not been done here.
+
+### Correction applied
+
+The words "on chip" have been removed from `docs/hardware.md`, the probe's messages, `docs/rspduo.md`
+and the comments in `rspduo.h`. The behaviour of every measurement above stands unchanged — only the
+explanation of where the decimation happens was wrong.
+
+### Also worth recording: a receiver artefact mistaken for a signal
+
+Chasing the aliasing test turned up a mistake of my own. A strong peak at **-408.2 kHz** appeared in
+every wideband capture, and I read it as an FM broadcast station and cited "+33.9 dB over the noise
+floor" as proof the receive chain worked. Retuning the centre frequency moved the peak with it — it
+is a **fixed offset artefact of the receiver, not a station**.
+
+So the claim in session 4 that "the chain receives real RF, proven by FM broadcast at 100 MHz" is not
+supported by that evidence. What is still solid there is narrower: the tuner changes what it hears
+when retuned, and the two tuners demonstrably receive different things. Whether anything on the air
+is being received at all is not established by the -408 kHz peak.

@@ -73,7 +73,7 @@ channels about 2 % away from where the frequency plan expects them. That is the 
 looks like "no aircraft heard today" rather than a bug.
 
 `SnapSampleRate()` therefore snaps and `Open()` prints what it applied, and the configuration asks
-for 2000000 explicitly. Rates below 2 MHz are reached with the API's on-chip decimation rather than
+for 2000000 explicitly. Rates below 2 MHz are reached with the API's decimation factor rather than
 by changing the ADC rate.
 
 ## The conversion scale, and how to settle it

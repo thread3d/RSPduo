@@ -154,7 +154,7 @@ int main(int argc, char **argv)
   int     Shift     = 8;
   int     BulkMode  = 1;
   int     DualMode  = 0;          /* -D: drive both tuners simultaneously */
-  int     Deci      = 1;          /* -d: on-chip decimation factor (2,4,8,16,32) */
+  int     Deci      = 1;          /* -d: decimation factor (2,4,8,16,32; powers of two only) */
   double  FreqB     = 0.0;        /* -B: tuner B centre, default FreqHz + 100 kHz */
 
   int opt;
@@ -182,7 +182,7 @@ int main(int argc, char **argv)
         printf("  -o  write converted u8 I/Q here (feed to tools/spectrum.py)\n");
         printf("  -s  conversion shift,  default 8\n");
     printf("  -m  transfer mode: bulk (default) or isoch\n");
-    printf("  -d  on-chip decimation factor: 2, 4, 8, 16 or 32 (default 1 = off)\n");
+    printf("  -d  decimation factor: 2, 4, 8, 16 or 32 (default 1 = off)\n");
     printf("  -D  dual-tuner mode: both tuners stream at once\n");
     printf("  -B  tuner B centre frequency, default -f + 100 kHz\n");
         return 2; } }
@@ -270,7 +270,7 @@ int main(int argc, char **argv)
   if (Deci > 1)
   { params->rxChannelA->ctrlParams.decimation.enable = 1;
     params->rxChannelA->ctrlParams.decimation.decimationFactor = (unsigned char)Deci;
-    printf("decimation  : factor %d applied on chip\n", Deci); }
+    printf("decimation  : factor %d requested\n", Deci); }
   else
   { params->rxChannelA->ctrlParams.decimation.enable = 0;
     params->rxChannelA->ctrlParams.decimation.decimationFactor = 1; }
@@ -278,7 +278,7 @@ int main(int argc, char **argv)
   double OutRate = RateHz / (double)(Deci > 1 ? Deci : 1);
   printf("\ntuning      : %9.3f MHz, %5.3f MSps%s, IF gain reduction %d dB, LNA state %d\n",
          FreqHz / 1e6, OutRate / 1e6,
-         (Deci > 1) ? " (decimated on chip)" : "", GainRedDB, LnaState);
+         (Deci > 1) ? " (decimation factor applied)" : "", GainRedDB, LnaState);
   printf("capturing   : %zu samples (%.2f s)\n", Requested, (double)Requested / RateHz);
 
   Capture C;
