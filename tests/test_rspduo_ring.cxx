@@ -1,0 +1,258 @@
+/*
+ * test_rspduo_ring.cxx - host-side unit test for the rspduo.h ring-buffer bridge
+ *
+ * The riskiest part of the RSPduo backend is not its configuration calls, which are checked by
+ * the compiler and then confirmed by the probe: it is the bridge from the SDRplay API's callback
+ * thread to ogn-rf's blocking Read(). That code can be exercised with no hardware and no vendor
+ * library at all, by stubbing the handful of sdrplay_api_* entry points rspduo.h calls, and
+ * driving the registered stream callback directly.
+ *
+ * What this checks:
+ *   - Open() parses the device description and succeeds through the stub
+ *   - the int16 -> interleaved u8 conversion, including the 128 offset and the clamping
+ *   - Read() returns exactly what was asked for and interleaves I and Q in the right order
+ *   - a stream reset flushes the ring rather than splicing two configurations together
+ *   - a ring overrun is counted, rather than silently dropping or corrupting data
+ *
+ * It does NOT check anything that depends on real hardware: tuning, gain, sample rate accuracy or
+ * the API's own behaviour. Those need the probe on the box.
+ *
+ * Two things about the backend that this test has to respect rather than assume:
+ *
+ *   - Read() rounds the requested count down to a multiple of 256, exactly as rtlsdr.h and
+ *     limesdr.h do. So every request below asks for a multiple of 256.
+ *   - rspduo.h passes a stack-local sdrplay_api_CallbackFnsT to sdrplay_api_Init(). That is fine
+ *     with the real library, which copies it, but a stub must copy the struct by value too; saving
+ *     the pointer leaves the test with a dangling reference as soon as Open() returns.
+ *
+ * Build and run (from the repository root):
+ *     g++ -O1 -Wall -I<ogn-rf checkout> -I<path-to-sdrplay-headers> -o test_rspduo_ring \
+ *         tests/test_rspduo_ring.cxx -lpthread
+ *     ./test_rspduo_ring
+ *
+ * The vendored headers are needed; the vendor library is not.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+
+#include <sdrplay_api.h>
+
+/* ---------------------------------------------------------------------------------------------
+ * Stubs for the vendor API.
+ * ------------------------------------------------------------------------------------------- */
+
+static sdrplay_api_DeviceParamsT    StubParams;
+static sdrplay_api_DevParamsT       StubDevParams;
+static sdrplay_api_RxChannelParamsT StubChannelA;
+
+/* Copied BY VALUE: see the note in the header comment. */
+static sdrplay_api_CallbackFnsT StubCbs;
+static int  StubHaveCbs   = 0;
+static void *StubCtx      = NULL;
+static int  StubInitCalls = 0;
+static int  StubUninitCalls = 0;
+
+extern "C" {
+
+sdrplay_api_ErrT sdrplay_api_Open(void)             { return sdrplay_api_Success; }
+sdrplay_api_ErrT sdrplay_api_Close(void)            { return sdrplay_api_Success; }
+sdrplay_api_ErrT sdrplay_api_LockDeviceApi(void)    { return sdrplay_api_Success; }
+sdrplay_api_ErrT sdrplay_api_UnlockDeviceApi(void)  { return sdrplay_api_Success; }
+
+sdrplay_api_ErrT sdrplay_api_ApiVersion(float *apiVer)
+{ if (apiVer) *apiVer = SDRPLAY_API_VERSION; return sdrplay_api_Success; }
+
+const char *sdrplay_api_GetErrorString(sdrplay_api_ErrT err)
+{ (void)err; return "stub error"; }
+
+sdrplay_api_ErrT sdrplay_api_GetDevices(sdrplay_api_DeviceT *devices, unsigned int *numDevs,
+                                        unsigned int maxDevs)
+{ if (numDevs) *numDevs = 1;
+  if (devices && maxDevs >= 1)
+  { memset(&devices[0], 0, sizeof(devices[0]));
+    devices[0].hwVer = SDRPLAY_RSPduo_ID;
+    devices[0].valid = 1;
+    strncpy(devices[0].SerNo, "STUB0001", SDRPLAY_MAX_SER_NO_LEN - 1); }
+  return sdrplay_api_Success; }
+
+sdrplay_api_ErrT sdrplay_api_SelectDevice(sdrplay_api_DeviceT *device)
+{ if (device) device->dev = (HANDLE)0xBEEF; return sdrplay_api_Success; }
+
+sdrplay_api_ErrT sdrplay_api_ReleaseDevice(sdrplay_api_DeviceT *device)
+{ if (device) device->dev = NULL; return sdrplay_api_Success; }
+
+sdrplay_api_ErrT sdrplay_api_GetDeviceParams(HANDLE dev, sdrplay_api_DeviceParamsT **deviceParams)
+{ (void)dev;
+  memset(&StubDevParams, 0, sizeof(StubDevParams));
+  memset(&StubChannelA, 0, sizeof(StubChannelA));
+  StubParams.devParams  = &StubDevParams;
+  StubParams.rxChannelA = &StubChannelA;
+  StubParams.rxChannelB = NULL;
+  if (deviceParams) *deviceParams = &StubParams;
+  return sdrplay_api_Success; }
+
+sdrplay_api_ErrT sdrplay_api_Init(HANDLE dev, sdrplay_api_CallbackFnsT *callbackFns, void *cbContext)
+{ (void)dev;
+  if (callbackFns) { StubCbs = *callbackFns; StubHaveCbs = 1; }
+  StubCtx = cbContext; StubInitCalls++;
+  return sdrplay_api_Success; }
+
+sdrplay_api_ErrT sdrplay_api_Uninit(HANDLE dev) { (void)dev; StubUninitCalls++; return sdrplay_api_Success; }
+
+sdrplay_api_ErrT sdrplay_api_Update(HANDLE dev, sdrplay_api_TunerSelectT tuner,
+                                    sdrplay_api_ReasonForUpdateT reason,
+                                    sdrplay_api_ReasonForUpdateExtension1T ext1)
+{ (void)dev; (void)tuner; (void)reason; (void)ext1; return sdrplay_api_Success; }
+
+} /* extern "C" */
+
+/* --------------------------------------------------------------------------------------------- */
+
+#include "buffer.h"
+#include "thread.h"
+#include "rspduo.h"
+
+static int Failures = 0;
+static int Checks   = 0;
+
+static void check(int ok, const char *what)
+{ Checks++;
+  if (ok) printf("  pass  %s\n", what);
+  else { printf("  FAIL  %s\n", what); Failures++; } }
+
+/* Feed samples into the backend exactly as the API would. */
+static void feed(const short *xi, const short *xq, unsigned int n, unsigned int reset)
+{ if (StubHaveCbs && StubCbs.StreamACbFn)
+    StubCbs.StreamACbFn((short *)xi, (short *)xq, NULL, n, reset, StubCtx);
+  else { printf("  FAIL  the backend never registered a stream callback\n"); Failures++; } }
+
+/* Fill a buffer with N samples of a constant value, so blocks can be told apart. */
+static void fill(short *xi, short *xq, unsigned int n, short vi, short vq)
+{ for (unsigned int i = 0; i < n; i++) { xi[i] = vi; xq[i] = vq; } }
+
+/* Check that a whole read buffer holds one constant converted value. */
+static int all_equal(const uint8_t *buf, unsigned int samples, uint8_t vi, uint8_t vq)
+{ for (unsigned int i = 0; i < samples; i++)
+    if (buf[2 * i] != vi || buf[2 * i + 1] != vq) return 0;
+  return 1; }
+
+int main(void)
+{
+  printf("rspduo.h ring-buffer bridge\n===========================\n");
+
+  /* ----------------------------------------------------------------------------------------- */
+  printf("\nOpen()\n");
+  RSPDuo Radio;
+  int r = Radio.Open(0, 868300000, 2000000);
+  check(r > 0, "Open() succeeds through the stub");
+  check(StubInitCalls == 1, "sdrplay_api_Init() was called exactly once");
+  check(Radio.isOpen(), "the backend reports itself open");
+  check(strcmp(Radio.getDeviceName(), "RSPduo") == 0, "the device is identified as an RSPduo");
+  check(strcmp(Radio.DeviceSerNo, "STUB0001") == 0, "the serial is reported");
+  check(fabs(Radio.SampleRateApplied - 2000000.0) < 1.0, "2 MSps is accepted as-is, not snapped");
+  check(StubHaveCbs && StubCbs.StreamACbFn != NULL, "a stream callback was registered");
+
+  /* ----------------------------------------------------------------------------------------- */
+  printf("\nConversion: int16 -> interleaved u8 with 128 as zero\n");
+  { /* A clean ramp: xi[i] = (i-128)<<8 converts to exactly i, and Q is a constant zero.
+       (i-128)<<8 lies in -32768..32512, so this stays inside int16. */
+    const unsigned int N = 256;
+    short xi[N], xq[N];
+    for (unsigned int i = 0; i < N; i++) { xi[i] = (short)(((int)i - 128) << 8); xq[i] = 0; }
+    feed(xi, xq, N, 0);
+
+    uint8_t buf[2 * N];
+    memset(buf, 0xAA, sizeof(buf));
+    int got = Radio.Read(buf, (int)N);
+    check(got == (int)N, "Read() returns the number of samples asked for");
+
+    int ramp_ok = 1;
+    for (unsigned int i = 0; i < N; i++) if (buf[2 * i] != (uint8_t)i) { ramp_ok = 0; break; }
+    check(ramp_ok, "I lands in the even bytes, in order, offset by 128");
+
+    int q_ok = 1;
+    for (unsigned int i = 0; i < N; i++) if (buf[2 * i + 1] != 128) { q_ok = 0; break; }
+    check(q_ok, "Q lands in the odd bytes"); }
+
+  /* ----------------------------------------------------------------------------------------- */
+  printf("\nClamping at both rails\n");
+  { const unsigned int N = 256;
+    short xi[N], xq[N];
+    fill(xi, xq, N, 0, 0);
+    xi[0] = 32767;  xq[0] = -32768;      /* the extremes: must rail at 255 and 0 */
+    feed(xi, xq, N, 0);
+
+    uint8_t buf[2 * N];
+    memset(buf, 0xAA, sizeof(buf));
+    int got = Radio.Read(buf, (int)N);
+    check(got == (int)N, "Read() returns 256 samples");
+    check(buf[0] == 255, "the most positive sample clamps to 255");
+    check(buf[1] == 0,   "the most negative sample clamps to 0");
+    check(buf[2] == 128 && buf[3] == 128, "the following zero sample is 128"); }
+
+  /* ----------------------------------------------------------------------------------------- */
+  printf("\nReset flushes the ring\n");
+  { const unsigned int N = 256;
+    short xi[N], xq[N];
+    uint8_t buf[2 * N];
+
+    /* Block A: everything zero -> 128. Queue it, then reset while queueing the same block:
+       the reset must discard the earlier copy, leaving exactly one block readable. */
+    fill(xi, xq, N, 0, 0);
+    feed(xi, xq, N, 0);
+    feed(xi, xq, N, 1);
+    memset(buf, 0xAA, sizeof(buf));
+    int got = Radio.Read(buf, (int)N);
+    check(got == (int)N, "one block is readable after a mid-stream reset");
+    check(all_equal(buf, N, 128, 128), "the readable block is the post-reset one");
+
+    /* Now a block that is visibly different, queued with reset: it must be what comes back. */
+    fill(xi, xq, N, (short)(1 << 8), 0);       /* converts to 129 */
+    feed(xi, xq, N, 1);
+    memset(buf, 0xAA, sizeof(buf));
+    got = Radio.Read(buf, (int)N);
+    check(got == (int)N, "the post-reset block is readable");
+    check(all_equal(buf, N, 129, 128), "and it is the new block, not the old one");
+ }
+
+  /* ----------------------------------------------------------------------------------------- */
+  printf("\nOverrun is counted, not silently swallowed\n");
+  { Radio.ResetBuffer();
+    uint64_t before = Radio.Overflows;
+
+    /* The ring is 2 MiB = 1 M samples. Push 4 x 300k = 1.2 M samples through it, which cannot
+       fit, so the callback must drop and count rather than corrupt. */
+    const unsigned int BLOCK = 307200;         /* multiple of 256 */
+    short *xi = (short *)malloc(BLOCK * sizeof(short));
+    short *xq = (short *)malloc(BLOCK * sizeof(short));
+    int allocated = (xi != NULL && xq != NULL);
+    check(allocated, "scratch buffers allocated");
+    if (allocated)
+    { fill(xi, xq, BLOCK, 0, 0);
+      for (int b = 0; b < 4; b++) feed(xi, xq, BLOCK, 0);
+      check(Radio.Overflows > before, "the overrun was counted in Overflows");
+
+      uint8_t buf[2 * 256];
+      memset(buf, 0xAA, sizeof(buf));
+      int got = Radio.Read(buf, 256);
+      check(got == 256, "the ring still delivers samples after an overrun");
+      check(all_equal(buf, 256, 128, 128), "and the samples are coherent, not torn");
+      Radio.ResetBuffer(); }
+    free(xi); free(xq); }
+
+  /* ----------------------------------------------------------------------------------------- */
+  printf("\nClose()\n");
+  Radio.Close();
+  check(!Radio.isOpen(), "the backend reports itself closed");
+  check(StubUninitCalls == 1, "sdrplay_api_Uninit() was called exactly once");
+  { uint8_t buf[2 * 256];
+    check(Radio.Read(buf, 256) < 0, "Read() on a closed radio fails instead of hanging"); }
+
+  printf("\n===========================\n");
+  printf("%d checks, %d failed\n", Checks, Failures);
+  return Failures == 0 ? 0 : 1;
+}

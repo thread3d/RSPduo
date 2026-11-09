@@ -21,3 +21,6 @@ __pycache__/
 # Editor / OS noise
 *~
 .DS_Store
+
+# Unit-test binary built by tests/run-tests.sh
+/tests/test_rspduo_ring
