@@ -235,8 +235,15 @@ int main(void)
     check(allocated, "scratch buffers allocated");
     if (allocated)
     { fill(xi, xq, BLOCK, 0, 0);
-      for (int b = 0; b < 4; b++) feed(xi, xq, BLOCK, 0);
-      check(Radio.getOverflows(0) > before, "the overrun was counted in Overflows");
+      /* Push until the ring actually overflows rather than assuming a capacity. The ring is
+         sized from the sample rate (two seconds), so a fixed block count silently stopped
+         overflowing it the moment that sizing changed - which is exactly what happened. */
+      int Blocks = 0;
+      for (; Blocks < 64 && Radio.getOverflows(0) == before; Blocks++)
+        feed(xi, xq, BLOCK, 0);
+      char what[128];
+      snprintf(what, sizeof(what), "the overrun was counted in Overflows (after %d blocks)", Blocks);
+      check(Radio.getOverflows(0) > before, what);
 
       uint8_t buf[2 * 256];
       memset(buf, 0xAA, sizeof(buf));
