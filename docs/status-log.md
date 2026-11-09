@@ -524,3 +524,61 @@ So the claim in session 4 that "the chain receives real RF, proven by FM broadca
 supported by that evidence. What is still solid there is narrower: the tuner changes what it hears
 when retuned, and the two tuners demonstrably receive different things. Whether anything on the air
 is being received at all is not established by the -408 kHz peak.
+
+## Bring-up session 10 — what is actually inside the box, and open drivers
+
+Asked to research the RSPduo's internals and whether a different driver could decimate on-chip.
+Sources: the vendor datasheet and introduction PDFs, the SDRplay hardware-API page, and the open
+Mirics drivers.
+
+### The silicon
+
+From the vendor's own [RSPduo datasheet](https://sdrplay.com/wp-content/uploads/2026/06/RSPduo_Datasheet.pdf)
+and the [RSPduo Introduction](https://storage.eleshop.eu/files/RSPduo-Introduction-V3.pdf):
+
+- The radio front end is the **Mirics MSi2500**, which contains **two 14-bit ADCs**, with two
+  independent tuners piped through a single USB 2.0 interface.
+- **Zero IF** uses *both* ADCs, one for I and one for Q, and reaches up to 10 MHz of displayed
+  bandwidth.
+- **Low IF** uses *one* ADC per tuner — which is the only way both tuners can run at once. In the
+  vendor's words, dual-tuner operation is "ONLY POSSIBLE IF BOTH TUNERS ARE OPERATING IN LOW IF
+  MODE", and in Low IF the maximum flat passband is 1.536 MHz.
+- ADC resolution depends on the sampling rate: **14-bit at 6 MHz and below, 12-bit at 8 MHz.**
+
+This explains, from the vendor's own documentation, three things that until now were only empirical
+observations here: why `IF_Zero` is rejected in dual mode, why dual-mode bandwidths stop at
+1.536 MHz, and why dual mode caps at 2 MSps per tuner.
+
+### Decimation: unresolved, and I have now claimed both answers
+
+The `sdrplay_apiService` binary carries register-level decimation controls — `decimateControl`,
+`DecimateOutScale`, `DecimateRound[0]`/`[1]` (logged as 32-bit hex register values) — alongside GPIO
+and tuner-channel register calls (`GpioDualExtWrite()`, `rspDuoTunerChannelConfig`). That implies a
+hardware decimator.
+
+Against that, the daemon also contains 2541 NEON-register operands and 67 vector instructions, so
+host DSP is not excluded either, and the CPU/8 MHz measurements in session 9 suggested the limit
+applies before the factor. An earlier commit here asserted "no SIMD" on the strength of a grep that
+did not match AArch64 syntax — that claim was wrong and has been removed.
+
+Settling it needs `usbmon` (root): whether 32x drops the traffic from 8 MB/s to 0.25 MB/s.
+Until then `docs/rspduo.md` marks "decimation does not save USB bandwidth" as unverified.
+
+### Open drivers, and whether a different one could help
+
+Three relevant projects:
+
+- [libmirisdr-5](https://github.com/ericek111/libmirisdr-5) — an open driver for MSi2500/MSi001
+  based SDRs. **Contains no decimation support at all** (`\bdecim` matches zero times).
+- [Linux `drivers/media/usb/msi2500/msi2500.c`](https://github.com/torvalds/linux/blob/master/drivers/media/usb/msi2500/msi2500.c)
+  — the in-tree driver, also with no decimation. But it exposes the MSi2500's ADC rate as
+  programmable from **1.2 MHz to 15 MHz**, which is a much wider range than the 2/6/8 MHz the
+  SDRplay API allows. An open driver could therefore pick a low rate *natively* instead of
+  decimating to it — which would sidestep the 2 MHz floor entirely.
+- [cybermunkeh/msi001-control-lab](https://github.com/cybermunkeh/msi001-control-lab) — active
+  reverse engineering of MSi001/MSi2500 register control, with `MSi001_registers.md` and
+  `MSi2500_transfer_verification.md`. The most likely place for the decimator registers to be
+  documented by someone.
+
+The running kernel here has no `msi2500` module (`modinfo msi2500` fails), so none of this is
+presently usable on the box.
