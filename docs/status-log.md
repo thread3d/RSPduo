@@ -582,3 +582,30 @@ Three relevant projects:
 
 The running kernel here has no `msi2500` module (`modinfo msi2500` fails), so none of this is
 presently usable on the box.
+
+## Bring-up session 11 — are the two tuners phase-coherent?
+
+Relevant to anyone thinking of using two antennas on the two receivers. Both tuners were pointed at
+the same frequency (868.3 MHz) and the two I/Q streams compared over one second:
+
+```
+zero-lag correlation |rho| = 0.1625   phase = +116.7 deg
+per-block |rho| : mean 0.1628  min 0.1554  max 0.1720
+per-block phase : mean +116.6  std 3.8 deg  spread 13 deg
+block phases    : +116 +114 +114 +115 +111 +116 +115 +118 +124 +123
+```
+
+**The two receive chains are phase-coherent.** The phase offset is a constant ~117 deg that moves
+only 13 deg over a second, and the correlation magnitude is equally steady. So coherent combining
+across the two tuners is physically possible, after calibrating out that fixed offset — the shared
+ADC clock makes this work, which is exactly what the vendor's introduction describes as the one
+thing dual-tuner mode cannot separate.
+
+|rho| of 0.16 is the interesting number: the two chains are seeing mostly *independent* noise with
+only a small common component. That is good news for combining (two independent noise sources, one
+correlated signal is the best case for maximal-ratio combining) and it also means neither tuner is
+merely an echo of the other.
+
+Not established: whether the *external* noise seen by two separate antennas is correlated. That
+depends on the antennas and their spacing, not on the receiver, and it decides how much diversity
+gain is actually available.
