@@ -155,10 +155,11 @@ int main(int argc, char **argv)
   int     BulkMode  = 1;
   int     DualMode  = 0;          /* -D: drive both tuners simultaneously */
   int     Deci      = 1;          /* -d: decimation factor (2,4,8,16,32; powers of two only) */
+  int     BiasTee   = 0;          /* -t: enable the 4.7 V bias tee (Tuner 2 port only) */
   double  FreqB     = 0.0;        /* -B: tuner B centre, default FreqHz + 100 kHz */
 
   int opt;
-  while ((opt = getopt(argc, argv, "f:r:g:l:n:o:s:m:B:d:Dh")) != -1)
+  while ((opt = getopt(argc, argv, "f:r:g:l:n:o:s:m:B:d:Dth")) != -1)
   { switch (opt)
     { case 'f': FreqHz    = atof(optarg); break;
       case 'r': RateHz    = atof(optarg); break;
@@ -171,6 +172,7 @@ int main(int argc, char **argv)
       case 'B': FreqB     = atof(optarg); break;
       case 'd': Deci      = atoi(optarg); break;
       case 'D': DualMode  = 1; break;
+      case 't': BiasTee   = 1; break;
       default:
         printf("usage: %s [-f freq_hz] [-r rate_hz] [-g if_gain_reduction_dB] [-l lna_state]\n"
                "          [-n samples] [-o out.u8] [-s shift]\n", argv[0]);
@@ -184,6 +186,7 @@ int main(int argc, char **argv)
     printf("  -m  transfer mode: bulk (default) or isoch\n");
     printf("  -d  decimation factor: 2, 4, 8, 16 or 32 (default 1 = off)\n");
     printf("  -D  dual-tuner mode: both tuners stream at once\n");
+    printf("  -t  enable the bias tee (4.7 V, Tuner 2 port only)\n");
     printf("  -B  tuner B centre frequency, default -f + 100 kHz\n");
         return 2; } }
 
@@ -273,6 +276,9 @@ int main(int argc, char **argv)
   params->rxChannelA->tunerParams.gain.LNAstate  = (unsigned char)LnaState;
   params->rxChannelA->tunerParams.gain.minGr     = sdrplay_api_NORMAL_MIN_GR;
   params->rxChannelA->ctrlParams.agc.enable = sdrplay_api_AGC_DISABLE;
+  if (BiasTee)
+  { params->rxChannelA->rspDuoTunerParams.biasTEnable = 1;
+    printf("bias tee     : 4.7 V enabled on the Tuner 2 port\n"); }
 
   /* On-chip decimation. The ADC cannot run below 2 MHz, so this is the only way to get a lower
      output rate; asking for one directly makes Init() fail. */
