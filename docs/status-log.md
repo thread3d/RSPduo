@@ -714,3 +714,49 @@ shows).
 Practical consequence: **decimation is not a lever for slot coverage**, so there is no reason to
 trade bandwidth for it. That removes the main argument for running below 2 MSps in single-tuner
 mode.
+
+## Bring-up session 15 — LNAs and 868 filters fitted
+
+Two antennas with an amplifier and an 868 MHz band filter each. Measured at gRdB 30, 2 MSps:
+
+| | rms (int16) | dBFS |
+|---|---|---|
+| 868.300 MHz **before** LNA | 263.7 | −41.9 |
+| 868.300 MHz **after** LNA | **889.6** | **−31.3** |
+
+**+10.6 dB**, so the amplifiers are working and are now first in the chain, which is where they
+help: they set the system noise figure, and everything after them (including the RSPduo's own front
+end) contributes less.
+
+### The crest factor collapsed, which suggests compression
+
+| | peak | rms | crest |
+|---|---|---|---|
+| before | 5942 | 263.7 | 22.5 (27 dB) |
+| after | 7751 | 889.6 | 8.7 (19 dB) |
+
+The noise floor rose 10.6 dB but the peaks barely moved (2.3 dB). That asymmetry means the peaks
+were already being limited, so the +10.6 dB went into the noise floor and not into the impulses.
+No hard `ADC overload DETECTED` was raised at any gain setting, but the headroom at maximum gain is
+now only about 3 dB rather than the 20 dB measured before the LNAs.
+
+### The filter could not be tested this way
+
+Levels at other frequencies are essentially the same as in band:
+
+| 868.300 | 100.000 | 433.920 |
+|---|---|---|
+| −31.3 dBFS | −33.6 dBFS | −31.4 dBFS |
+
+That is **not** evidence the filters are ineffective. With no signal present at any of those
+frequencies, every reading is just the amplified noise floor, which is frequency-independent, so the
+comparison carries no information about rejection. Proving the filters work needs a known strong
+out-of-band signal — a nearby FM broadcast carrier, or a signal generator — and a before/after level
+comparison at that frequency.
+
+### Gain advice
+
+`RF.OGN.Gain = 95` still measures 86 of 128 counts (7.4 bits) at maximum gain with no clipping, so
+it remains a sane setting — but it now has ~3 dB of headroom instead of ~20 dB. If a strong local
+transmitter appears, cut the gain rather than waiting for the overload flag, since the impulses
+compress before the flag trips.
