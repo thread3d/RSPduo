@@ -36,7 +36,8 @@ LimeSDR work:
 | Delivered sample rate | **2.017 Msps** for 2.000 requested (+0.8 %) |
 | Real RF confirmed | **yes** — FM broadcast at 100 MHz, +33.9 dB over the noise floor |
 | ogn-rf runs on the RSPduo | **yes** — status page reports RSPduo, 868.300 MHz, 2.000 MHz |
-| Both tuners (dual mode) | **working** — A at 868.300, B at 868.400, streaming simultaneously at 1 Msps each |
+| Both tuners (dual mode) | **working** — 1.000 Msps each, on one frequency, sample-aligned at lag 0 |
+| Tuner pair coherence | **verified** — 0 sample lag, phase stable to ±3.8° over a second |
 | Tuner independence | **verified** — A sees +16.9 dB of FM content, B at 433.92 MHz sees +1.3 dB |
 | Live OGN packet decoding | **not yet** — 868 MHz measures as quiet here; see below |
 

@@ -651,3 +651,47 @@ only, which is the expected result rather than a fault — but it does mean real
 not been demonstrated, because that needs two antennas and a fade to observe. Vertical spacing of
 17.3 cm is the recommended arrangement; horizontal λ spacing should be avoided, since a two-element
 array at d = λ has lobes at broadside *and* endfire and nulls at ±30°.
+
+## Bring-up session 13 — settled: 1 MSps, both tuners, one frequency, sample-aligned
+
+Final configuration, and one check I had not made before. Both tuners were pointed at 868.300 MHz
+and the two I/Q streams cross-correlated over 400 000 samples:
+
+```
+tuning      :   868.300 MHz, 1.000 MSps
+tuner B     :   868.300 MHz
+captured    : 400000 samples (each)
+best lag    : +0 samples (0.0 us) with |rho| = 0.3714
+zero-lag    : 0.3714   (same, so the peak really is at lag 0)
+```
+
+**The two streams are sample-aligned at lag 0.** Not merely sharing a clock — the same sample index
+in one stream corresponds to the same instant in the other. That is what coherent processing needs,
+and it was an assumption until now.
+
+Combined with the earlier phase measurement (+116.6 deg, stable to +-3.8 deg over a second), the
+pair is a genuinely coherent two-channel receiver: aligned in time, locked in phase, offset by a
+constant that can be calibrated out.
+
+### The settled configuration
+
+```ini
+RF = {
+  DeviceType = "rspduo";
+  SampleRate = 2000000;                    // ADC rate; the API's fixed dual combination then
+                                           // gives bw 600 kHz, IF 450 kHz, decimation 2
+  RSPduo = {
+    DualTuner          = 1;                // both tuners, 1.000 Msps each
+    SelectionDiversity = 1;                // and both on the SAME frequency
+  };
+};
+```
+
+`SelectionDiversity = 1` is what pins tuner B to tuner A's frequency; without it tuner B sits at
++100 kHz on the neighbouring OGN channel.
+
+### The cost, stated plainly
+
+Dual mode gives 600 kHz of bandwidth per tuner instead of 1536 kHz, and Live Time measured 18.2 %
+against 33.3 % for single-tuner. That is the price of two coherent 1 MSps channels rather than one
+2 MSps channel, and it is a real one on a quiet band.
