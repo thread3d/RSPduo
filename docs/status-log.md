@@ -695,3 +695,22 @@ RF = {
 Dual mode gives 600 kHz of bandwidth per tuner instead of 1536 kHz, and Live Time measured 18.2 %
 against 33.3 % for single-tuner. That is the price of two coherent 1 MSps channels rather than one
 2 MSps channel, and it is a real one on a quiet band.
+
+## Bring-up session 14 — sample rate does NOT fix slot coverage
+
+Twice I suspected ogn-rf's poor Live Time was a CPU/throughput problem that a lower sample rate
+would fix. Measured properly, single-tuner, identical otherwise:
+
+| SampleRate | Live Time | half-slot msgs | dropped |
+|---|---|---|---|
+| 2000000 | 21.1 % | 22 | 20 |
+| 500000 | 21.1 % | 22 | 20 |
+
+**Identical.** A 4x reduction in sample rate changed nothing, so the limitation is not sample
+processing throughput. It is something in ogn-rf's slot/queue timing that is independent of rate
+(and it varies run to run with machine load: 21-33 % across sessions, the same range the LimeSDR
+shows).
+
+Practical consequence: **decimation is not a lever for slot coverage**, so there is no reason to
+trade bandwidth for it. That removes the main argument for running below 2 MSps in single-tuner
+mode.
