@@ -760,3 +760,56 @@ comparison at that frequency.
 it remains a sane setting — but it now has ~3 dB of headroom instead of ~20 dB. If a strong local
 transmitter appears, cut the gain rather than waiting for the overload flag, since the impulses
 compress before the flag trips.
+
+## Bring-up session 16 — first real signal, and the real bottleneck
+
+### An aircraft overhead produced actual bursts
+
+Four seconds of 1 MSps data, block-averaged at 1 ms:
+
+| | median block power | peak | peak above median |
+|---|---|---|---|
+| Tuner A | 1.6 | 6.2 | +6.0 dB |
+| Tuner B | 15.4 | 163.4 | **+10.3 dB** |
+
+Bursts clustered at slot-like times (0.071, 0.751, 0.911, 3.631, 3.771, 3.791 s), Tuner B consistently
+~5 dB above Tuner A on them. **The first confirmed real signal in the whole exercise.**
+
+Crucially, inter-tuner |rho| **rises** during the bursts:
+
+| | \|rho\| |
+|---|---|
+| quietest 50% of blocks | 0.432 |
+| **loudest 0.5% of blocks** | **0.661** |
+
+That is the signature of a common external signal rather than independent noise, which is what
+distinguishes "signal present" from "noise wandering". It also says something about the diversity:
+0.66 is fairly correlated, as expected for an aircraft overhead where the direct path dominates.
+Diversity should earn its keep at LOW elevation, not overhead.
+
+### Live Time is not a throughput limit either
+
+`RF.OGN.SensTime` was 0.85 s. Swept it:
+
+| SensTime | Live Time | half-slots | dropped |
+|---|---|---|---|
+| 0.85 | 18.8 % | 3 | 1 |
+| 0.45 | 25.0 % | 8 | 6 |
+| 0.25 | 25.0 % | 9 | 7 |
+
+It improves once and then **plateaus at 25 %**, so the amount read is not the constraint. Reading
+less does not help, which points at the acquisition loop missing slot boundaries: the outer loop
+only reads when `WaitTime < 0.200`, and when an iteration overruns a second that gate skips the
+slot outright rather than catching up.
+
+**Deliberately left at 0.85.** Lowering it raises the Live Time *metric* while cutting actual
+listening time from 0.85 s per second to 0.45 s, so the "improvement" is partly the metric being
+computed over shorter reads rather than more packets caught. A higher number that hears less is not
+progress.
+
+### Also fixed: the receiver opened at maximum gain
+
+The backend initialised gain to GR_DB_MIN and ogn-rf calls setTunerGain() only after Open(), so
+every start streamed briefly at full gain. Harmless without an LNA, but with one in front it
+overloaded the ADC — the first live run logged a burst of "ADC overload detected" at open. Now
+starts mid-range.
