@@ -34,21 +34,31 @@ LimeSDR work:
 | Conversion scale (`Shift = 8`) | **measured and confirmed** — peak −3.0 dBFS, zero clipping, full 16-bit scale in use |
 | Gain law | **measured** — total = 115.8 − gRdB at LNA 0, i.e. 56.8–95.8 dB |
 | Delivered sample rate | **2.017 Msps** for 2.000 requested (+0.8 %) |
-| Real RF confirmed | **yes** — FM broadcast at 100 MHz, +33.9 dB over the noise floor |
+| Starts on this host | **fixed** — FFTW planning stalled it before `main()`; see session 17 |
+| Real RF confirmed | **not established** — the +33.9 dB peak once cited was the receiver's own −408 kHz artefact; the one confirmed signal is the burst in session 16 |
 | ogn-rf runs on the RSPduo | **yes** — status page reports RSPduo, 868.300 MHz, 2.000 MHz |
 | Both tuners (dual mode) | **working** — 1.000 Msps each, on one frequency, sample-aligned at lag 0 |
 | Tuner pair coherence | **verified** — 0 sample lag, phase stable to ±3.8° over a second |
 | Tuner independence | **verified** — A sees +16.9 dB of FM content, B at 433.92 MHz sees +1.3 dB |
-| Live OGN packet decoding | **not yet** — 868 MHz measures as quiet here; see below |
+| Slot acquisition | **fixed** — one full read per second in both modes, Live Time 6.6 % → **93.4 %** |
+| Decoder attached | **no** — `ogn-decode` is not installed; without it Live Time is meaningless |
+| Live OGN packet decoding | **not yet** — no decoder, and 868 MHz measures as quiet here; see below |
 
-The chain is verified end to end on hardware. What is still missing is an OGN transmitter in range:
-at maximum gain both OGN channels sit on the noise floor (+0.1 dB at 868.200, +0.3 dB at 868.400),
-exactly as the LimeSDR work found on this site. That is the nature of OGN rather than a fault — see
-[`docs/status-log.md`](docs/status-log.md) for the measurements.
+The receiver is verified end to end on hardware as far as it can be without a decoder and without a
+transmitter in range: it opens, tunes, streams at the rate it reports, and now completes one read
+per slot instead of one every five. What is still missing is `ogn-decode` on the far end of
+`ogn-rf.fifo`, and an OGN transmitter to hear — at maximum gain both OGN channels sit on the noise
+floor (+0.1 dB at 868.200, +0.3 dB at 868.400), exactly as the LimeSDR work found on this site.
 
-One thing that looks alarming and is not: ogn-rf reports "Half time slot" and "Dropped a slot", and
-a Live Time of 33 %. Run the working LimeSDR build as a control and it reports **the same 33.3 %**
-with the same counts, so that is this machine and configuration, not this backend.
+Two things that look alarming and are not:
+
+- **`ogn-rf.fifo` must have a reader.** `Inp_FFT` opens it `O_WRONLY`, which blocks until something
+  is reading, and the whole demodulation chain stops behind it. Any Live Time figure taken without a
+  reader is measuring the missing decoder, not the radio — which is what the earlier "33 %, and the
+  LimeSDR says the same" reading actually was. `scripts/measure-livetime.sh` attaches a reader and
+  refuses to report a figure without one.
+- **Live Time stays a little under 100 %.** The residue is ogn-rf's "half time slot" path being
+  taken when the demodulator queue holds more than one batch, which is the design working.
 
 ## Quick start
 

@@ -150,3 +150,34 @@ Running cleanly proves the radio, the API, the conversion, the rate and the timi
 It does **not** prove OGN decoding, because that needs a transmitter in range. On-site, the 868 MHz
 band has previously measured as quiet, so a correctly-working receiver can legitimately show no
 aircraft — exactly the state the LimeSDR work ended in.
+
+## Tracing the acquisition loop
+
+Most of what was wrong in this integration was invisible from the status page: the aggregate Live
+Time counter cannot tell a short read from a skipped slot, a needless retune or a stalled
+demodulator, and those have completely different fixes. Build a traced binary when the figure looks
+wrong — it is compile-time only, so the production build is unaffected:
+
+```bash
+cd ~/projects/RSPduo/ogn-rf
+P=$HOME/projects/KrakenSDR/krakensdr/deps/prefix
+g++ -Wall -O3 -ffast-math -DVERSION=0.2.6 -DACQ_TRACE -DUSE_RSPDUO -DUSE_LIMESDR \
+    -I$P/include -I/usr/local/include -o ogn-rf-trace ogn-rf.cc \
+    -L$P/lib -Wl,-rpath,$P/lib -L/usr/local/lib -Wl,-rpath,/usr/local/lib \
+    -lpthread -lm -ljpeg -lconfig -lrt -lrtlsdr -lfftw3 -lfftw3f -lSoapySDR -lsdrplay_api
+```
+
+Then run it with `scripts/trace-acq.sh <config> [seconds]`, which attaches a reader to
+`ogn-rf.fifo` (without one the demodulator blocks and every reading is meaningless), samples the
+status page and summarises the trace. One line per acquisition iteration:
+
+```
+ACQ read  t=… frac=0.234 wait=0.141 want=850000 got=849920 dt=0.835 q=0 ba=15676416 bb=15676416
+ACQ tune  t=… dt=0.000 freq=868.300MHz changed=0
+ACQ skip  t=… frac=0.876 wait=0.499 q=0
+```
+
+`want`/`got` are samples requested and returned, `dt` the wall time the read or retune took, `q` the
+demodulator queue depth, and `ba`/`bb` the backend's own byte counters — which is how the delivered
+rate was caught being 500 ksps against a reported 1.000 Msps. What "right" looks like in dual mode
+at `RF.SampleRate = 2000000` is `want=850000`, `dt≈0.85`, `tune dt=0.000`, one read per second.

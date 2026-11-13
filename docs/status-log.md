@@ -813,3 +813,122 @@ The backend initialised gain to GR_DB_MIN and ogn-rf calls setTunerGain() only a
 every start streamed briefly at full gain. Harmless without an LNA, but with one in front it
 overloaded the ADC — the first live run logged a burst of "ADC overload detected" at open. Now
 starts mid-range.
+
+## Bring-up session 17 — it would not start, and it was only listening to a fifth of each second
+
+Two separate problems: the receiver could not launch at all, and once it did it spent most of every
+second neither reading nor demodulating. Both are fixed and measured. Three of the earlier
+conclusions in this log were wrong and are corrected below.
+
+### First: the branch had been silently taken apart
+
+Commit `5a76aa6` ("Open at a mid gain, not the maximum") was meant to change one initialiser in
+`rspduo.h`. It changed five files by −136 lines: `Makefile`, `fft.h`, `gsm_scan.cc` and
+`ogn-rf.cc` were replaced with their `master` versions, and only `rspduo.h` got the intended edit.
+`ogn-rf.cc` and the `Makefile` were restored on Nov 13 (which is when the backend was discovered
+to be dead code); `fft.h` and `gsm_scan.cc` were missed. `380a37f` restores both, byte-identical to
+their state at `99cd491`.
+
+Worth stating plainly because it has now cost two sessions: this is the third time work on this
+branch has been reverted by a commit whose message describes something else. A build that works is
+not evidence that the tree is right — `git diff 99cd491 HEAD --stat` is, and it is cheap.
+
+### Second: `fft.h` was why ogn-rf would not start
+
+`FFTW_MEASURE` benchmarks candidate algorithms at plan time, and ogn-rf plans three float
+transforms in global constructors, before `main()`. Single-precision planning is pathologically
+slow on this host. Reproduced without ogn-rf at all:
+
+| n | FFTW_ESTIMATE | FFTW_MEASURE |
+|---|---|---|
+| 64 | — | 4.3 s |
+| 128 | — | 8.2 s |
+| 1024 | — | does not finish in 20 s |
+| 32768 | **0.007 s** | does not finish in 20 s |
+
+So the process sat at 100% of one core, single-threaded, printing nothing, and looked hung. Stopped
+under gdb, the backtrace is `fftwf_plan_dft_1d → fftwf_mkapiplan → fftwf_mkplan_d →
+fftwf_measure_execution_time` under `Inp_Filter<float>::Inp_Filter` under
+`_GLOBAL__sub_I_…`, i.e. static init. The prior session had already measured 37 s at 4096 points
+and 61 s at 32768 and committed the fix (`3893229`, `FFTW_PLAN_FLAG` defaulting to `FFTW_ESTIMATE`);
+that is the change `5a76aa6` removed. Restored.
+
+### Third: Live Time was measuring a missing decoder, not the radio
+
+`Inp_FFT` hands each demodulated slot to the decoder through `ogn-rf.fifo`, and it opens that FIFO
+`O_WRONLY` — which **blocks until a reader appears**. There is no `ogn-decode` on this board and
+nothing was reading the FIFO, so the demodulation chain stopped at the first slot: the RF queue
+filled, `RF_Acq` dropped every later slot, and Live Time decayed to whatever it had reached before
+the block.
+
+That is the whole of the earlier "Live Time 33%, the same on the LimeSDR, so it is this machine"
+reading. The LimeSDR control run was measuring the same absent decoder. Attaching
+`cat ogn-rf.fifo > /dev/null` stops the drops, and `measure-livetime.sh` in `scripts/` now attaches
+one by default and refuses to report a figure without it.
+
+### Fourth: three real faults in the acquisition path
+
+Found by tracing the loop itself — a new `-DACQ_TRACE` build of `ogn-rf.cc` prints, per iteration,
+the gate decision, the samples asked for and received, how long the read and the retune took, and
+the backend's own byte counters. Compile-time only; the production build is unchanged.
+
+**1. A retune on every slot that changed nothing.** `setCenterFreq()` issued
+`sdrplay_api_Update(Tuner_A, Tuner_Frf)` unconditionally, and that Update restarts the stream:
+measured 0.402 s per call in single-tuner mode and 0.804 s in dual, with the callback returning
+`reset=1` so the buffered samples are discarded as well. The European plan puts 868.200 and 868.400
+inside one capture window, so the centre frequency never changes and every one of those calls was
+pure loss. Now guarded, exactly as the LimeSDR backend guards its 60 ms retune.
+
+**2. Dual mode programmed the decimation twice.** Dual mode's rate is fixed by the API from its own
+(ADC rate, bandwidth, IF) combination, and the host-side decimation controls must stay off. The
+backend set them to `DualCombo`'s factor on top of that:
+
+```
+probe, dual mode, bw 0.6 MHz, 2 MHz ADC
+  decimation controls off : 1.008 Msps delivered
+  decimation factor 2 set : 0.504 Msps delivered   (-49.6%)
+```
+
+So the ring received 500 ksps while the backend reported 1.000 Msps, and every read took twice as
+long as its sample count implied.
+
+**3. ogn-rf sized everything from the rate it asked for, not the rate it got.** `RF.SampleRate`
+asks for an ADC rate; in dual mode each tuner gets half of it. ogn-rf asked for 0.85 s of 2 MSps —
+1 700 000 samples — from a radio handing over 1 Msps, so each read took 1.7 s of a 1 s slot, and
+`Inp_FFT` planned a 2 MSps demodulator for a 1 Msps stream, which is a decoding fault on top of the
+timing one. `SampleRate` is now the delivered rate, `AdcRate` the requested one, and the delivered
+rate comes from a new `SDR_Device::predictSampleRate()`, answerable before `Open()` because the
+RSPduo is the only backend whose two rates differ.
+
+### Measured result
+
+Dual-tuner mode, 868.300 MHz, reader attached, production build:
+
+| | before | after |
+|---|---|---|
+| samples asked per read | 1 700 000 | 850 000 |
+| read duration | 3.412 s | 0.849 s |
+| retune duration | 0.804 s | 0.000 s |
+| reads per second | 0.20 | **1.00** |
+| Live Time | 6.6 % and falling | **93.4 %** |
+| ring overruns | 0 | 0 |
+| dropped slots in 60 s | 17 | 2 |
+
+Single-tuner mode measures the same 93.4 %. One read per second is what the slot cadence asks for;
+the residue below 100 % is the "half time slot" path being taken occasionally when the demodulator
+queue has more than one batch waiting, which is the design working rather than a fault.
+
+### Still open
+
+- **No decoder is installed.** The chain now demodulates continuously, but the spectra leave through
+  `ogn-rf.fifo` and nothing consumes them. `ogn-decode` has to be built and run, with a station
+  callsign, before a packet can be decoded end to end.
+- **No OGN transmitter in range.** Unchanged from session 16: 868.200 and 868.400 measure on the
+  noise floor. Session 16's aircraft overhead remains the only confirmed signal.
+- **"ADC overload detected" fires constantly** — 261 times in 60 s in dual mode, 135 in single, at
+  `RF.OGN.Gain = 66`. Session 4 wrote this off as a startup transient; at this rate it needs
+  checking, because the gain was extrapolated from a gRdB 40 measurement rather than measured at
+  50, and the LNA chain is known to compress before the flag trips.
+- **"Real RF confirmed" in the README is not supported** by the evidence it cites: session 9 showed
+  the +33.9 dB peak at 100 MHz was the receiver's own −408 kHz artefact, not a station. The README
+  row has been corrected.
