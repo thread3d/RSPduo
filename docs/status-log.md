@@ -925,10 +925,28 @@ queue has more than one batch waiting, which is the design working rather than a
   callsign, before a packet can be decoded end to end.
 - **No OGN transmitter in range.** Unchanged from session 16: 868.200 and 868.400 measure on the
   noise floor. Session 16's aircraft overhead remains the only confirmed signal.
-- **"ADC overload detected" fires constantly** — 261 times in 60 s in dual mode, 135 in single, at
-  `RF.OGN.Gain = 66`. Session 4 wrote this off as a startup transient; at this rate it needs
-  checking, because the gain was extrapolated from a gRdB 40 measurement rather than measured at
-  50, and the LNA chain is known to compress before the flag trips.
+- **The chain is too hot, and no gain setting fixes it.** Chasing the constant "ADC overload
+  detected" events (261 in 60 s at `RF.OGN.Gain = 66`) turned up two code faults and one hardware
+  conclusion. The code faults are fixed: `setTunerGain()` only ever reached tuner A, so in dual mode
+  tuner B kept whatever gain `Init()` gave it; and the constructor opened at mid gain (gRdB 50),
+  which *starts* a real overload — 18 "detected" events in six seconds with the probe — that this
+  API then keeps reporting across a later live gain change. Opening at the quietest gain took that
+  to **0 detections in 20 s**.
+
+  The hardware conclusion is the one that matters for reception. Across the whole of the radio's
+  gain range the amplified chain has almost no headroom:
+
+  | | tuner A peak | rms | headroom |
+  |---|---|---|---|
+  | gRdB 50 (`Gain 66.0`) | 24943 (−2.4 dBFS) | 6365 (−14.2 dBFS) | 2.4 dB |
+  | gRdB 59 (`Gain 56.8`) | 21330 (−3.7 dBFS) | 2934 (−21.0 dBFS) | 3.7 dB |
+
+  Nine dB of gain reduction bought 1.3 dB of peak, which is compression rather than headroom, and an
+  OGN burst has a crest factor of 8–11 dB against the 2–4 dB available. So bursts fold at the ADC
+  before they can be decoded, whatever `RF.OGN.Gain` is set to. The fix is a 6–10 dB pad between
+  each LNA and the radio, which costs almost nothing in sensitivity here because the LNA, not the
+  radio, sets the noise figure. `config/ogn-rf-rspduo.conf` now sits at 56.8 dB — the most headroom
+  the radio can give — with those measurements recorded beside it.
 - **"Real RF confirmed" in the README is not supported** by the evidence it cites: session 9 showed
   the +33.9 dB peak at 100 MHz was the receiver's own −408 kHz artefact, not a station. The README
   row has been corrected.

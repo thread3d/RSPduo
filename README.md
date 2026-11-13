@@ -32,7 +32,7 @@ LimeSDR work:
 | Ring-buffer bridge | **unit-tested** — 25 checks, 0 failed, on both hosts, no hardware needed |
 | Backend committed and pushed | **yes** — `thread3d/ogn-rf`, branch `rspduo` |
 | Conversion scale (`Shift = 8`) | **measured and confirmed** — peak −3.0 dBFS, zero clipping, full 16-bit scale in use |
-| Gain law | **measured** — total = 115.8 − gRdB at LNA 0, i.e. 56.8–95.8 dB |
+| Gain law | **measured** — total = 115.8 − gRdB at LNA 0, i.e. 56.8–95.8 dB; set to 56.8 because the amplified chain leaves only 2.4–3.7 dB of headroom anywhere in that range |
 | Delivered sample rate | **2.017 Msps** for 2.000 requested (+0.8 %) |
 | Starts on this host | **fixed** — FFTW planning stalled it before `main()`; see session 17 |
 | Real RF confirmed | **not established** — the +33.9 dB peak once cited was the receiver's own −408 kHz artefact; the one confirmed signal is the burst in session 16 |
