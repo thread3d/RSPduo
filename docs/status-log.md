@@ -950,3 +950,38 @@ queue has more than one batch waiting, which is the design working rather than a
 - **"Real RF confirmed" in the README is not supported** by the evidence it cites: session 9 showed
   the +33.9 dB peak at 100 MHz was the receiver's own −408 kHz artefact, not a station. The README
   row has been corrected.
+
+## Bring-up session 17, addendum — what dual mode can actually deliver
+
+Asked whether duo mode can read 1 MSps on both channels. Yes, and more than that. Measured with the
+probe, both tuners running simultaneously, over a 10 s capture per tuner:
+
+| Dual-mode combination | Tuner A | Tuner B |
+|---|---|---|
+| 2 MHz ADC, bw 0.6 MHz, IF 450 kHz, API decimation 2 | 1.004 Msps | 1.004 Msps |
+| 6 MHz ADC, bw 1.536 MHz, IF 1.620 kHz, API decimation 3 | **2.000 Msps** | **2.000 Msps** |
+
+The "500 ksps" reported earlier in session 17 was not the device: it was this backend programming the
+API's own dual-mode decimation a *second* time (1.008 Msps with the host decimation controls off,
+0.504 with factor 2 set), which `43c5159` removed. The radio was giving 1 Msps per tuner all along.
+
+So the ceiling is not 1 MSps. The 6 MHz combination gives 2 Msps per tuner and sustains it here,
+which also revises session 8's conclusion: that session measured a 6 MHz ADC *in single-tuner mode*,
+asking the host for 6 Msps and getting 3.768, and read that as a bus limit. In dual mode the same ADC
+rate with decimation 3 hands the host 2 Msps per tuner — 4 Msps in total — and holds it. The figure
+that limits anything is the payload the host asks for, not the ADC rate.
+
+Two limits are worth stating plainly, because they are in the integration rather than the radio:
+
+- **This backend hard-codes the 2 MHz ADC combination for dual mode** (`DualCombo()`), so
+  `RF.SampleRate` is ignored there and 1 Msps per tuner is what you get. Exposing the 6 MHz
+  combination is a contained change, but see the next point before wanting it.
+- **ogn-rf only reads tuner A unless selection diversity is on.** With `DualTuner = 1` and
+  `SelectionDiversity = 0`, tuner B streams into a ring nothing drains: measured as
+  `Ring overruns A / B   0 / 8` in 15 s on the status page. The samples exist and are thrown away.
+  Diversity is the only path that consumes tuner B today, and it necessarily puts both tuners on the
+  *same* frequency.
+
+So "both OGN channels, 1 MSps each, simultaneously" is a capability of the hardware that the current
+pipeline does not consume. Using it means giving ogn-rf a second demodulation stream, which is a
+feature rather than a fix: `Inp_FFT` is single-stream by construction.
