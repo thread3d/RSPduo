@@ -40,7 +40,8 @@ LimeSDR work:
 | Both tuners (dual mode) | **working** — 1.000 Msps each, on one frequency, sample-aligned at lag 0 |
 | Tuner pair coherence | **verified** — 0 sample lag, phase stable to ±3.8° over a second |
 | Tuner independence | **verified** — A sees +16.9 dB of FM content, B at 433.92 MHz sees +1.3 dB |
-| Slot acquisition | **fixed** — one full read per second in both modes, Live Time 6.6 % → **93.4 %** |
+| Slot acquisition | **fixed** — one full read per second in both modes, Live Time 6.6 % → 93.4 % |
+| Extended run | **soaked 15 min** — Live Time mean **99.5 %** (min 97.3), 0 ring overruns, 0 dropped slots, flat 30 MB RSS, 8 threads |
 | Decoder attached | **no** — `ogn-decode` is not installed; without it Live Time is meaningless |
 | Live OGN packet decoding | **not yet** — no decoder, and 868 MHz measures as quiet here; see below |
 
@@ -57,8 +58,13 @@ Two things that look alarming and are not:
   reader is measuring the missing decoder, not the radio — which is what the earlier "33 %, and the
   LimeSDR says the same" reading actually was. `scripts/measure-livetime.sh` attaches a reader and
   refuses to report a figure without one.
-- **Live Time stays a little under 100 %.** The residue is ogn-rf's "half time slot" path being
-  taken when the demodulator queue holds more than one batch, which is the design working.
+- **Live Time is 99 %+, not 100 %.** Over a 15-minute soak it averaged 99.5 % with a minimum of
+  97.3 %; the residue is ogn-rf's "half time slot" path being taken when the demodulator queue holds
+  more than one batch, which is the design working.
+- **"ADC overload detected" is not a gain indicator on this unit.** It appears and disappears between
+  runs of the same binary at the same levels — 0 events in one 100 s run, 1806 in the next 15 min —
+  and never once coincided with clipping. Judge the gain from the probe's peak/rms/headroom instead;
+  `docs/status-log.md` session 18 has the runs side by side.
 
 ## Quick start
 

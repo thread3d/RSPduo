@@ -985,3 +985,87 @@ Two limits are worth stating plainly, because they are in the integration rather
 So "both OGN channels, 1 MSps each, simultaneously" is a capability of the hardware that the current
 pipeline does not consume. Using it means giving ogn-rf a second demodulation stream, which is a
 feature rather than a fix: `Inp_FFT` is single-stream by construction.
+
+## Bring-up session 18 — fifteen minutes of continuous operation, and a correction
+
+Diversity left as the default (`DualTuner = 1`, `SelectionDiversity = 1`, both tuners on 868.300) and
+the receiver run for a full 15 minutes, sampled every 30 s by `scripts/extended-test.sh`. Two soaks
+were run: the first on the build from session 17, the second on the build with the changes below.
+
+| | soak 1 (session 17 build) | soak 2 (final build) |
+|---|---|---|
+| Live Time, mean | 99.1 % | **99.5 %** |
+| Live Time, min / max | 94.7 % / 99.8 % | 97.3 % / 99.9 % |
+| ring overruns, A / B | 0 / 0 | **0 / 0** |
+| dropped slots / half time slots | 0 / 0 | **0 / 0** |
+| CPU | 7.3 % of one core | 7.2 % |
+| RSS | 31.2 MB, flat | 30.1 MB, flat |
+| threads | 8, constant | 8, constant |
+| `ogn-rf.fifo` output | 13.13 MB/s | 13.13 MB/s |
+| device present at the end | yes | yes |
+
+One full time slot read per second for 900 consecutive seconds, no dropped slots, no overruns, no
+memory or thread growth, and one demodulator output stream at a steady 13.13 MB/s. The only error in
+either log is a single FIFO write failure at teardown, when the harness kills the reader.
+
+The minimum in soak 1 (94.7 %) is the first sample, i.e. the running average settling after startup;
+that soak's 99.8 % plateau is the steady state. Soak 2 never dips below 97.3 %, which is what
+starting the stream at its configured gain buys (below).
+
+### What changed between the two soaks
+
+- `setTunerGainPreset()` — ogn-rf hands the backend its configured gain **before** `Open()`, so the
+  stream starts at the level it will run at. Previously the receiver opened at a constructor default
+  and was re-gained moments later.
+- `setTunerGain()`, `setBiasTee()` and `setFreqCorrection()` now skip their `sdrplay_api_Update()`
+  when the value already matches what `Open()` programmed. ogn-rf sets gain, bias tee and ppm
+  immediately after `Open()`, which has just programmed the same values, so all three were
+  restarting the tuner for nothing — the same waste the retune guard removed, in three more places.
+
+### Correction: the "ADC overload detected" stream is not a measurement
+
+Session 17 attributed the overload events to a mid-gain open and to a live gain update, and claimed
+opening quietest took them to zero. **That was drawn from single comparisons and does not hold.** The
+evidence against it, all on the same binary and configuration:
+
+| Run | duration | "detected" events | signal |
+|---|---|---|---|
+| check after the quietest-open change | 100 s | **0** | −3.1 dBFS peak, no clipping |
+| next soak, same binary | 900 s | **1806** | unchanged |
+| probe, same settings, independent client | 8 s | **0** | −3.1 dBFS peak |
+| earlier run, mid-gain open | 60 s | 261 | — |
+| earlier run, 45 s | 45 s | 95 | — |
+| earlier run, 70 s | 70 s | 0 | — |
+
+The label also flips per session and then stays put: a session reports about two events a second,
+almost all "detected" or almost all "corrected", never a mix. Since it does not track level (the
+signal never leaves the 2–4 dB-below-full-scale band), does not track gain, and does not affect any
+of the figures in the soak table — Live Time, overruns and drops are identical whether the run logs
+1806 detections or none — it is a per-session reporting artefact of this API on this unit.
+
+Practical rule for whoever picks this up: **do not use the overload events as a gain indicator.** Use
+the probe's peak/rms/headroom (`scripts/probe-rspduo.sh`), which is a measurement. The gain decision
+in `config/ogn-rf-rspduo.conf` rests on those numbers, not on the events.
+
+### Diversity, honestly
+
+The soak's diversity counters read "chose A = 909, chose B = 0, 0 switches": the backend evaluated
+both tuners on every read and picked A every time. That is the expected result with an antenna on one
+port and is not evidence for or against diversity gain — demonstrating it needs two antennas 17.3 cm
+apart vertically and a fade to observe, as session 12 concluded. What the soak does establish is that
+diversity costs nothing measurable: soak 1's 99.1 % and the single-tuner figure from session 17
+(93.4 %) are not directly comparable, but the diversity overhead that used to show as 18.2 % against
+33.3 % is gone.
+
+### Harness
+
+`scripts/extended-test.sh <config> <minutes> [sample_seconds]` runs the soak and writes, per run,
+`ogn-rf.log`, `samples.csv` (one row per sample: Live Time, both overrun counters, diversity choice,
+FIFO volume, CPU, RSS, threads) and `summary.txt`. It refuses to start if another `ogn-rf` is running
+and kills only the receiver it started — two harnesses that each `pkill -x ogn-rf` at teardown will
+otherwise kill each other's run, which happened once. `scripts/soak-clean.sh` stops leftovers and
+deliberately never signals its own caller's ancestors, for the same reason.
+
+One operational note: the FIFO reader writes the demodulator's output to disk, which is 13 MB/s, so a
+15-minute soak leaves a **12 GB** file behind. `summary.txt` reports the volume; delete `fifo.bin`
+after reading the results.

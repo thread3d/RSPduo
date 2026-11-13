@@ -45,7 +45,9 @@ fi
 for i in $(seq 1 $((SECS/10))); do
   sleep 10
   printf 't=%3ds  LiveTime=%-7s ring_overrun=%-7s dropped=%-4s fifo_MB=%s\n' \
-    $((i*10)) "$(field 'Live Time')" "$(field 'Ring overruns' | tr -d ' ')" \
+    $((i*10)) "$(field 'Live Time')" \
+    "$(curl -s --max-time 3 http://127.0.0.1:8095/ | sed -e 's/<[^>]*>/ /g' \
+        | awk '/Ring overruns/{print $6"/"$8}' | tr -d ' ')" \
     "$(grep -c 'Dropped a slot' "$LOG")" \
     "$(awk -v b="$(stat -c%s "$SINK" 2>/dev/null || echo 0)" 'BEGIN{printf "%.1f", b/1048576}')"
 done
